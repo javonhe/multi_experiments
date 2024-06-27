@@ -184,31 +184,12 @@ char *p_flags_str[] = {
 };
 
 
-int main(int argc, char **argv)
+static void parse_elf_head(FILE *fp)
 {
-    if (argc < 2)
-    {
-        printf("Usage: %s elf_file\n", argv[0]);
-        return -1;
-    }
-
-    FILE *fp = fopen(argv[1], "rb");
-    if (!fp)
-    {
-        printf("Open file %s failed\n", argv[1]);
-        return -1;
-    }
-
-    // read elf header
     elf64_hdr elf_header;
-    fread(&elf_header, sizeof(elf_header), 1, fp);
 
-    // check magic number
-    if (memcmp(ELF_MAGIC, elf_header.e_ident, 4) != 0)
-    {
-        printf("Not a valid ELF file\n");
-        return -1;
-    }
+    fseek(fp, 0, SEEK_SET);
+    fread(&elf_header, sizeof(elf_header), 1, fp);
 
     printf("ELF header:\n");
     printf("  Magic: %02x %02x %02x %02x\n", elf_header.e_ident[0],
@@ -232,9 +213,19 @@ int main(int argc, char **argv)
     printf("  Section header entry count: %d\n", elf_header.e_shnum);
     printf("  Section header string index: %d\n", elf_header.e_shstrndx);
     printf("\n");
+}
+
+
+static void parse_program_header(FILE *fp)
+{
+    elf64_hdr elf_header;
+
+    fseek(fp, 0, SEEK_SET);
+    fread(&elf_header, sizeof(elf_header), 1, fp);
+    fseek(fp, elf_header.e_phoff, SEEK_SET);
 
     printf("ELF Program header:\n");
-    fseek(fp, elf_header.e_phoff, SEEK_SET);
+
     for (int i = 0; i < elf_header.e_phnum; i++)
     {
         elf64_phdr phdr;
@@ -281,6 +272,36 @@ int main(int argc, char **argv)
         printf("  Align: 0x%lx\n", phdr.p_align);
         printf("\n");
     }
+}
+
+
+int main(int argc, char **argv)
+{
+    if (argc < 2)
+    {
+        printf("Usage: %s elf_file\n", argv[0]);
+        return -1;
+    }
+
+    FILE *fp = fopen(argv[1], "rb");
+    if (!fp)
+    {
+        printf("Open file %s failed\n", argv[1]);
+        return -1;
+    }
+
+    // read elf header
+    elf64_hdr elf_header;
+    fread(&elf_header, sizeof(elf_header), 1, fp);
+
+    // check magic number
+    if (memcmp(ELF_MAGIC, elf_header.e_ident, 4) != 0)
+    {
+        printf("Not a valid ELF file\n");
+        return -1;
+    }
+
+    parse_elf_head(fp);
 
     fclose(fp);
 
