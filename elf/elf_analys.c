@@ -175,12 +175,54 @@ enum
     PF_X = 1,
     PF_W = 2,
     PF_R = 4,
+    PF_WX = 3,
+    FP_RX = 5,
+    PF_RW = 6,
+    PF_RWX = 7,
 };
 
 char *p_flags_str[] = {
-    [PF_X] = "Executable segment",
-    [PF_W] = "Writeable segment",
-    [PF_R] = "Readable segment"
+    [PF_X] = "Executable",
+    [PF_W] = "Writeable",
+    [PF_R] = "Readable",
+    [PF_WX] = "Writeable and executable",
+    [FP_RX] = "Readable and executable",
+    [PF_RW] = "Readable and writeable",
+    [PF_RWX] = "Readable, writeable and executable"
+};
+
+char *sh_type_str[] = {
+    [0x00] = 	"NULL",
+    [0x01] = 	"Program data",
+    [0x02] = 	"Symbol table",
+    [0x03] = 	"String table",
+    [0x04] = 	"Relocation entries with addends",
+    [0x05] = 	"Symbol Hash table",
+    [0x06] = 	"Dynamic linking information",
+    [0x07] = 	"Notes",
+    [0x08] = 	"Program space without data (bss)",
+    [0x09] = 	"Relocation entries without addends",
+    [0x0a] = 	"Reserved",
+    [0x0b] = 	"Dynamic linker symbol table",
+    [0x0e] = 	"Init function pointers",
+    [0x0f] = 	"Fini function pointers",
+    [0x10] = 	"preinit function pointers",
+    [0x11] = 	"Section group",
+    [0x12] = 	"Extended section indexes",
+    [0x13] = 	"Number of defined types"
+};
+
+char *sh_flags_str[] = {
+    [0x01] = 	"Writable",
+    [0x02] = 	"Allocatable",
+    [0x04] = 	"Executable",
+    [0x10] = 	"Merged",
+    [0x20] = 	"String data",
+    [0x40] = 	"Information",
+    [0x80] = 	"Preserve order after combining",
+    [0x100] = 	"Non-standard OS specific handling required",
+    [0x200] = 	"member of a section group",
+    [0x400] = 	"hold thread-local data"
 };
 
 
@@ -263,13 +305,41 @@ static void parse_program_header(FILE *fp)
             printf("  Type: %s\n", pt_type_str[phdr.p_type]);
         }
 
-        printf("  Flags: %d\n", phdr.p_flags);
+        printf("  Flags: %s\n", p_flags_str[phdr.p_flags]);
         printf("  Offset: 0x%lx\n", phdr.p_offset);
         printf("  Vaddr: 0x%lx\n", phdr.p_vaddr);
         printf("  Paddr: 0x%lx\n", phdr.p_paddr); 
         printf("  Filesz: 0x%lx\n", phdr.p_filesz);
         printf("  Memsz: 0x%lx\n", phdr.p_memsz);
         printf("  Align: 0x%lx\n", phdr.p_align);
+        printf("\n");
+    }
+}
+
+
+static void parse_section_header(FILE *fp)
+{
+    elf64_hdr elf_header;
+
+    fseek(fp, 0, SEEK_SET);
+    fread(&elf_header, sizeof(elf_header), 1, fp);
+    fseek(fp, elf_header.e_shoff, SEEK_SET);
+
+    printf("ELF Section header:\n");
+    for (int i = 0; i < elf_header.e_shnum; i++)
+    {
+        elf64_shdr shdr;
+        fread(&shdr, sizeof(shdr), 1, fp);
+        printf("  Name: %s\n", shdr.sh_name);
+        printf("  Type: %s\n", sh_type_str[shdr.sh_type]);
+        printf("  Flags: %s\n", sh_flags_str[shdr.sh_flags]);
+        printf("  Addr: 0x%lx\n", shdr.sh_addr);
+        printf("  Offset: 0x%lx\n", shdr.sh_offset);
+        printf("  Size: 0x%lx\n", shdr.sh_size);
+        printf("  Link: 0x%x\n", shdr.sh_link);
+        printf("  Info: 0x%x\n", shdr.sh_info);
+        printf("  Addralign: 0x%lx\n", shdr.sh_addralign);
+        printf("  Entrysize: 0x%lx\n", shdr.sh_entsize);
         printf("\n");
     }
 }
@@ -301,7 +371,9 @@ int main(int argc, char **argv)
         return -1;
     }
 
-    parse_elf_head(fp);
+    //parse_elf_head(fp);
+    //parse_program_header(fp);
+    parse_section_header(fp);
 
     fclose(fp);
 
