@@ -320,19 +320,84 @@ static void parse_program_header(FILE *fp)
 static void parse_section_header(FILE *fp)
 {
     elf64_hdr elf_header;
+    elf64_shdr section_name_hdr;
+    char buf[4096];
 
+    // 获取文件头
     fseek(fp, 0, SEEK_SET);
     fread(&elf_header, sizeof(elf_header), 1, fp);
+
+    // 获取 section name的 header
+    fseek(fp, elf_header.e_shoff + elf_header.e_shstrndx * sizeof(elf64_shdr), SEEK_SET);
+    fread(&section_name_hdr, sizeof(elf64_shdr), 1, fp);
+
+    // 获取 section name
+    memset(buf, 0, sizeof(buf));
+    fseek(fp, section_name_hdr.sh_offset, SEEK_SET);
+    fread(buf, section_name_hdr.sh_size, 1, fp);
+
+    // 获取 section header的偏移
     fseek(fp, elf_header.e_shoff, SEEK_SET);
 
+    // 获取 section header
     printf("ELF Section header:\n");
     for (int i = 0; i < elf_header.e_shnum; i++)
     {
         elf64_shdr shdr;
         fread(&shdr, sizeof(shdr), 1, fp);
-        printf("  Name: %s\n", shdr.sh_name);
-        printf("  Type: %s\n", sh_type_str[shdr.sh_type]);
-        printf("  Flags: %s\n", sh_flags_str[shdr.sh_flags]);
+        printf("  Index: %d\n", i);
+        printf("  Name: %s\n", shdr.sh_name + buf);
+        if (shdr.sh_type > sizeof(sh_type_str) / sizeof(char *))
+        {
+            if (shdr.sh_type == 0x6ffffff6)
+            {
+                printf("  Type: GNU_HASH\n");
+            }
+            else if (shdr.sh_type == 0x6fffffff)
+            {
+                printf("  Type: VERSYM\n");
+            }
+            else if (shdr.sh_type == 0x6ffffffe)
+            {
+                printf("  Type: VERNEED\n");
+            }
+            else
+            {
+                printf("  Type: 0x%x\n", shdr.sh_type);
+            }
+        }
+        else
+        {
+            printf("  Type: %s\n", sh_type_str[shdr.sh_type]);
+        }
+
+        if (shdr.sh_flags > sizeof(sh_flags_str) / sizeof(char *))
+        {
+            printf("  Flags: 0x%x\n", shdr.sh_flags);
+        }
+        else
+        {
+            uint8_t find_sh_str = 0;
+            printf("  Flags: ");
+            for (unsigned int j = 1; j < sizeof(sh_flags_str) / sizeof(char *); j = j << 1)
+            {
+                if (shdr.sh_flags & j)
+                {
+                    if (find_sh_str)
+                    {
+                        printf(" | ");
+                    }
+                    printf("%s", sh_flags_str[shdr.sh_flags & j]);
+                    find_sh_str = 1;
+                }
+            }
+
+            if (!find_sh_str)
+            {
+                printf("0x%x", shdr.sh_flags);
+            }
+            printf("\n");
+        }
         printf("  Addr: 0x%lx\n", shdr.sh_addr);
         printf("  Offset: 0x%lx\n", shdr.sh_offset);
         printf("  Size: 0x%lx\n", shdr.sh_size);

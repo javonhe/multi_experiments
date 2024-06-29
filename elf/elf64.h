@@ -50,7 +50,7 @@ typedef struct
 // ELF Section Header
 typedef struct
 {
-	unsigned char 	sh_name[4];
+	uint32_t 	sh_name;
 	uint32_t 	sh_type;
 	uint64_t 	sh_flags;
 	uint64_t 	sh_addr;
