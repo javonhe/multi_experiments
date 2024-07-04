@@ -27,5 +27,7 @@ int main()
 
 	int result = svc_write(1, buf, 6);
 
+    while(1);
+
     return 0;
 }

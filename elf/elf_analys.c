@@ -436,8 +436,8 @@ int main(int argc, char **argv)
         return -1;
     }
 
-    //parse_elf_head(fp);
-    //parse_program_header(fp);
+    parse_elf_head(fp);
+    parse_program_header(fp);
     parse_section_header(fp);
 
     fclose(fp);
