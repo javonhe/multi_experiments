@@ -3,7 +3,13 @@
 
 int main(int argc, char *argv[])
 {
-	write(1, "hello\n", 6);
+    
+    int fd = open(argv[1], O_CREAT | O_APPEND | O_RDWR, 0644);
+
+    if (fd > 0)
+    {
+        write(fd, "hello world", 12);
+    }
 
     return 0;
 }
