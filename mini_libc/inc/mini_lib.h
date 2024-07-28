@@ -13,5 +13,6 @@
 
 int write(int fd, const void *buf, int count);
 int open(const char *pathname, int flags, int mode);
+int close(int fd);
 
 #endif

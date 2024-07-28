@@ -9,6 +9,7 @@ int main(int argc, char *argv[])
     if (fd > 0)
     {
         write(fd, "hello world", 12);
+        close(fd);
     }
 
     return 0;
