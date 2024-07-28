@@ -11,6 +11,8 @@
 #define O_TRUNC 00001000
 #define O_APPEND 00002000
 
+int strlen(const char *s);
+char *itoa(int num, char *str, int radix);
 int write(int fd, const void *buf, int count);
 int open(const char *pathname, int flags, int mode);
 int close(int fd);
