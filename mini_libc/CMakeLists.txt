@@ -13,11 +13,11 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/out/bin)
 include_directories(${CMAKE_SOURCE_DIR}/inc)
 link_directories(${CMAKE_ARCHIVE_OUTPUT_DIRECTORY})
 
-set(MINI_LIBC_SRC src/mini_libc_entry.S src/string.c src/write.c src/open.c src/close.c)
+set(MINI_LIBC_SRC src/mini_libc_entry.S src/string.c src/printf.c src/write.c src/open.c src/close.c)
 set(TEST_MINI_LIBC test/test_mini_lib.c)
 
 # 设置编译选项
-add_compile_options(-std=gnu99 -g -fno-builtin)
+add_compile_options(-std=gnu99 -g -fno-builtin-strlen)
 
 # 设置链接选项
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -nostdlib -e _mini_libc_entry -no-pie")

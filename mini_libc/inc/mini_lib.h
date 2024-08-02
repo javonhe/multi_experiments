@@ -11,10 +11,16 @@
 #define O_TRUNC 00001000
 #define O_APPEND 00002000
 
+#define va_list __builtin_va_list
+#define va_start(ap, last) __builtin_va_start(ap, last)
+#define va_arg(ap, type) __builtin_va_arg(ap, type)
+#define va_end(ap) __builtin_va_end(ap)
+
 int strlen(const char *s);
 char *itoa(int num, char *str, int radix);
 int write(int fd, const void *buf, int count);
 int open(const char *pathname, int flags, int mode);
 int close(int fd);
+int printf(const char *format, ...);
 
 #endif
