@@ -10,6 +10,11 @@ int main(int argc, char *argv[])
     if (fd > 0)
     {
         write(fd, "hello world", 12);
+
+        // 测试lseek，打印文件长度
+        int len = lseek(fd, 0, SEEK_END);
+        printf("file length: %d\n", len);
+
         close(fd);
     }
 

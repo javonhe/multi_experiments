@@ -16,11 +16,19 @@
 #define va_arg(ap, type) __builtin_va_arg(ap, type)
 #define va_end(ap) __builtin_va_end(ap)
 
+enum
+{
+    SEEK_SET = 0,
+    SEEK_CUR,
+    SEEK_END
+};
+
 int strlen(const char *s);
 char *itoa(int num, char *str, int radix);
 int write(int fd, const void *buf, int count);
 int open(const char *pathname, int flags, int mode);
 int close(int fd);
 int printf(const char *format, ...);
+int lseek(int fd, int offset, int whence);
 
 #endif
