@@ -18,5 +18,11 @@ int main(int argc, char *argv[])
         close(fd);
     }
 
+    // 测试sbrk
+    void *p = sbrk(1024);
+    printf("sbrk p: 0x%x\n", (long)p);
+
+    while(1);
+
     return 0;
 }
