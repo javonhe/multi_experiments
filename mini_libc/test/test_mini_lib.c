@@ -20,7 +20,18 @@ int main(int argc, char *argv[])
 
     // 测试sbrk
     void *p = sbrk(1024);
-    printf("sbrk p: 0x%x\n", (long)p);
+    printf("sbrk p: 0x%lx\n", (long)p);
+
+    // 测试mmap
+    void *mmap_p = mmap(NULL, 1024, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (mmap_p == NULL)
+    {
+        printf("mmap failed\n");
+    }
+    else
+    {
+        printf("mmap p: 0x%lx\n", (long)mmap_p);
+    }
 
     while(1);
 

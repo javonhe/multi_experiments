@@ -25,6 +25,10 @@
 /* Sharing types (must choose one and only one of these).  */
 #define MAP_SHARED        0x01                /* Share changes.  */
 #define MAP_PRIVATE        0x02                /* Changes are private.  */
+#define MAP_FILE        0
+#define MAP_ANONYMOUS        0x20                /* Don't use a file.  */
+#define MAP_ANON        MAP_ANONYMOUS
+
 
 #define va_list __builtin_va_list
 #define va_start(ap, last) __builtin_va_start(ap, last)
@@ -41,7 +45,7 @@ enum
 };
 
 int strlen(const char *s);
-char *itoa(int num, char *str, int radix);
+char *itoa(long num, char *str, int radix, unsigned char sign_flag);
 int write(int fd, const void *buf, int count);
 int open(const char *pathname, int flags, int mode);
 int close(int fd);

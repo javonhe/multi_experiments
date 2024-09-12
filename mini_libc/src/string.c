@@ -13,22 +13,25 @@ int strlen(const char *s)
 }
 
 
-char *itoa(int num, char *str, int radix)
+char *itoa(long num, char *str, int radix, unsigned char sign_flag)
 {
     int i = 0;
-    int sign = num < 0 ? -1 : 1;
+    int sign = 1;
+    unsigned long num_u = (unsigned long) num;
+    
+    if (sign_flag == 1)
+    {
+        sign = num < 0 ? -1 : 1;
+    }
 
-    if (sign == -1)
-        num = -num;
-
-    // 处理错误的基数
+     // 处理错误的基数
     if (radix < 2 || radix > 16)
     {
         return NULL;
     }
 
     // 处理0的情况
-    if (num == 0)
+    if (num_u == 0)
     {
         str[i++] = '0';
         str[i] = '\0';
@@ -36,11 +39,11 @@ char *itoa(int num, char *str, int radix)
     }
 
     // 生成数字字符串
-    while (num != 0)
+    while (num_u != 0)
     {
-        int rem = num % radix;
+        unsigned int rem = num_u % radix;
         str[i++] = (rem > 9) ? (rem - 10) + 'a' : rem + '0';
-        num /= radix;
+        num_u /= radix;
     }
 
     // 如果数字是负数，则添加负号
