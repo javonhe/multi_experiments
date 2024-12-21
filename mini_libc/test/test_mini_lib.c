@@ -1,6 +1,5 @@
 #include "mini_lib.h"
 
-
 int main(int argc, char *argv[])
 {
     int fd = open(argv[1], O_CREAT | O_APPEND | O_RDWR, 0644);
@@ -21,6 +20,24 @@ int main(int argc, char *argv[])
     // 测试sbrk
     void *p = sbrk(1024);
     printf("sbrk p: 0x%lx\n", (long)p);
+
+    // 测试malloc和free
+    char *str = (char *)malloc(256);
+    if (str != NULL) 
+    {
+        printf("malloc success, addr: 0x%lx\n", (long)str);
+        
+        memset(str, 'A', 127);
+        str[127] = '\0';
+        printf("after memset, str: %s\n", str);
+        
+        free(str);
+        printf("free success\n");
+    } 
+    else 
+    {
+        printf("malloc failed\n");
+    }
 
     // 测试mmap
     void *mmap_p = mmap(NULL, 1024, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);

@@ -55,6 +55,22 @@ int brk(void *end_data);
 void *sbrk(long increment);
 void *mmap(void *addr, long size, int prot, int flags, int fd, long offset);
 int munmap(void *addr, long size);
-void *malloc(int size);
+
+// 内存管理相关类型和函数声明
+typedef unsigned long size_t;
+typedef unsigned long uintptr_t;
+
+// 内存管理函数声明
+void* malloc(size_t size);
+void free(void* ptr);
+void* memset(void* s, int c, size_t n);
+
+// mmap相关常量定义
+#define PROT_READ  0x1
+#define PROT_WRITE 0x2
+#define MAP_PRIVATE   0x2
+#define MAP_ANONYMOUS 0x20
+#define MAP_FAILED ((void *)-1)
+#define NULL ((void*)0)
 
 #endif
