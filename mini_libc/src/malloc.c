@@ -162,20 +162,30 @@ static block_t* split_block(buddy_allocator_t* allocator, block_t* block, int ta
     {
         // 计算新的order和大小
         int new_order = block->order - 1;
-        size_t new_size = (1 << new_order) * MIN_BLOCK_SIZE;
+        size_t block_size = (1UL << new_order) * MIN_BLOCK_SIZE;
         
-        // 创建伙伴块
-        block_t* buddy = (block_t*)((char*)block + new_size);
-        buddy->size = new_size - sizeof(block_t);
+        // 计算伙伴块地址 - 直接在当前块后面
+        uintptr_t block_addr = (uintptr_t)block;
+        uintptr_t buddy_addr = block_addr + block_size;
+        
+        // 验证buddy_addr的有效性
+        if (buddy_addr + block_size > (uintptr_t)allocator->heap_start + allocator->heap_size) {
+            break;
+        }
+        
+        block_t* buddy = (block_t*)buddy_addr;
+        
+        // 更新原块信息
+        block->size = block_size - sizeof(block_t);
+        block->order = new_order;
+        block->buddy = buddy;
+        
+        // 初始化伙伴块
+        buddy->size = block_size - sizeof(block_t);
         buddy->order = new_order;
         buddy->is_free = 1;
         buddy->next = allocator->free_lists[new_order];
         buddy->buddy = block;
-        
-        // 更新原块信息
-        block->size = new_size - sizeof(block_t);
-        block->order = new_order;
-        block->buddy = buddy;
         
         // 将新的伙伴块加入空闲链表
         allocator->free_lists[new_order] = buddy;
@@ -198,12 +208,25 @@ static void merge_blocks(buddy_allocator_t* allocator, block_t* block)
         {
             break;
         }
-
+        
         // 验证伙伴块是否在有效范围内
-        void* buddy_end = (char*)buddy + (1 << buddy->order) * MIN_BLOCK_SIZE;
-        if ((void*)buddy < allocator->heap_start || 
-            buddy_end > (char*)allocator->heap_start + allocator->heap_size) 
-        {
+        size_t block_size = (1UL << block->order) * MIN_BLOCK_SIZE;
+        uintptr_t block_addr = (uintptr_t)block;
+        uintptr_t buddy_addr = (uintptr_t)buddy;
+        
+        // 确保block是两个块中地址较小的那个
+        if (buddy_addr < block_addr) {
+            // 如果buddy在block前面，交换它们
+            block_t* temp = block;
+            block = buddy;
+            buddy = temp;
+            block_addr = (uintptr_t)block;
+            buddy_addr = (uintptr_t)buddy;
+        }
+        
+        // 验证buddy是否紧跟在block后面
+        if (buddy_addr != block_addr + block_size) {
+            printf("ERROR: Invalid buddy address\n");
             break;
         }
         
@@ -218,26 +241,22 @@ static void merge_blocks(buddy_allocator_t* allocator, block_t* block)
             *list = buddy->next;
         }
         
-        // 选择地址较小的块作为合并后的块
-        if ((char*)buddy < (char*)block) 
-        {
-            block = buddy;
-        }
         // 更新合并后块的信息
         block->order++;
-        block->size = (1 << block->order) * MIN_BLOCK_SIZE - sizeof(block_t);
-        block->buddy = NULL;
-
-        if (block->order >= MAX_ORDER) 
-        {
-            break;
-        }
-
+        block->size = (1UL << block->order) * MIN_BLOCK_SIZE - sizeof(block_t);
+        
         // 计算新的伙伴块地址
-        size_t block_size = 1 << block->order;
-        uintptr_t block_addr = (uintptr_t)block;
-        uintptr_t buddy_addr = block_addr ^ (block_size * MIN_BLOCK_SIZE);
-        block->buddy = (block_t*)buddy_addr;
+        block_size = (1UL << block->order) * MIN_BLOCK_SIZE;
+        buddy_addr = block_addr + block_size;
+        
+        if (buddy_addr < (uintptr_t)allocator->heap_start + allocator->heap_size)
+        {
+            block->buddy = (block_t*)buddy_addr;
+        }
+        else
+        {
+            block->buddy = NULL;
+        }
     }
     
     // 将合并后的块加入对应的空闲链表
@@ -373,7 +392,7 @@ void* malloc(size_t size)
     {
         if (!expand_memory_pool(allocator, total_size)) 
         {
-            return NULL;  // 扩展失���
+            return NULL;  // 扩展失败
         }
         return malloc(size);  // 递归调用，重新尝试分配
     }
@@ -406,6 +425,5 @@ void free(void* ptr)
     
     block_t* block = (block_t*)((char*)ptr - sizeof(block_t));
     block->is_free = 1;
-    
     merge_blocks(global_allocator, block);
 }
