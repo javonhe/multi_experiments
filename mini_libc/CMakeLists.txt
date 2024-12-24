@@ -13,7 +13,21 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/out/bin)
 include_directories(${CMAKE_SOURCE_DIR}/inc)
 link_directories(${CMAKE_ARCHIVE_OUTPUT_DIRECTORY})
 
-set(MINI_LIBC_SRC src/mini_libc_entry.S src/string.c src/printf.c src/write.c src/open.c src/close.c src/lseek.c src/brk.c src/mmap.c src/malloc.c)
+# 设置源文件列表
+set(MINI_LIBC_SRC 
+    src/mini_libc_entry.S 
+    src/string.c 
+    src/printf.c 
+    src/write.c 
+    src/open.c 
+    src/close.c 
+    src/lseek.c 
+    src/brk.c 
+    src/mmap.c 
+    src/malloc.c
+    src/fork.c     # 添加fork.c
+)
+
 set(TEST_MINI_LIBC test/test_mini_lib.c)
 
 # 设置编译选项
