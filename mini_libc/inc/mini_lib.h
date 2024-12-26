@@ -33,18 +33,6 @@ enum
     SEEK_END
 };
 
-int strlen(const char *s);
-char *itoa(long num, char *str, int radix, unsigned char sign_flag);
-int write(int fd, const void *buf, int count);
-int open(const char *pathname, int flags, int mode);
-int close(int fd);
-int printf(const char *format, ...);
-int lseek(int fd, int offset, int whence);
-int brk(void *end_data);
-void *sbrk(long increment);
-void *mmap(void *addr, long size, int prot, int flags, int fd, long offset);
-int munmap(void *addr, long size);
-
 // 基本类型定义
 typedef unsigned long size_t;
 typedef long ssize_t;
@@ -52,33 +40,11 @@ typedef unsigned long uintptr_t;
 typedef int pid_t;
 typedef unsigned int socklen_t;
 
-// 其他类型定义
-struct sockaddr {
-    unsigned short sa_family;
-    char sa_data[14];
-};
-
-struct in_addr {
-    unsigned long s_addr;
-};
-
-struct sockaddr_in {
-    short          sin_family;
-    unsigned short sin_port;
-    struct in_addr sin_addr;
-    char           sin_zero[8];
-};
-
 // 变长参数相关定义
 #define va_list __builtin_va_list
 #define va_start(ap, last) __builtin_va_start(ap, last)
 #define va_arg(ap, type) __builtin_va_arg(ap, type)
 #define va_end(ap) __builtin_va_end(ap)
-
-// 内存管理函数声明
-void* malloc(size_t size);
-void free(void* ptr);
-void* memset(void* s, int c, size_t n);
 
 // mmap相关常量定义
 #define PROT_READ  0x1
@@ -104,7 +70,49 @@ typedef unsigned int socklen_t;
 /* 特殊IP地址 */
 #define INADDR_ANY ((unsigned long)0x00000000)
 
-/* Socket函数声明 */
+// 网络相关结构体定义
+struct sockaddr {
+    unsigned short sa_family;
+    char sa_data[14];
+};
+
+struct in_addr {
+    unsigned long s_addr;
+};
+
+struct sockaddr_in {
+    short          sin_family;
+    unsigned short sin_port;
+    struct in_addr sin_addr;
+    char           sin_zero[8];
+};
+
+// 字符串操作函数声明
+int strlen(const char *s);
+char *itoa(long num, char *str, int radix, unsigned char sign_flag);
+
+// 文件操作函数声明
+int write(int fd, const void *buf, int count);
+int open(const char *pathname, int flags, int mode);
+int close(int fd);
+int lseek(int fd, int offset, int whence);
+// 打印函数声明
+int printf(const char *format, ...);
+
+// 内存管理函数声明
+int brk(void *end_data);
+void *sbrk(long increment);
+void *mmap(void *addr, long size, int prot, int flags, int fd, long offset);
+int munmap(void *addr, long size);
+void* malloc(size_t size);
+void free(void* ptr);
+void* memset(void* s, int c, size_t n);
+
+// 进程操作函数声明
+int fork(void);
+pid_t getpid(void);
+
+// Socket操作函数声明
 int socket(int domain, int type, int protocol);
 int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
 int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
@@ -113,11 +121,5 @@ int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
 ssize_t send(int sockfd, const void *buf, size_t len, int flags);
 ssize_t recv(int sockfd, void *buf, size_t len, int flags);
 unsigned short htons(unsigned short hostshort);
-
-// 在函数声明部分添加
-int fork(void);
-
-// 声明系统调用接口
-pid_t getpid(void);
 
 #endif

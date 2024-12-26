@@ -26,6 +26,7 @@ set(MINI_LIBC_SRC
     src/mmap.c 
     src/malloc.c
     src/fork.c     # 添加fork.c
+    src/socket.c
 )
 
 set(TEST_MINI_LIBC test/test_mini_lib.c)
