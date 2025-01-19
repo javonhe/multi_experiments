@@ -23,6 +23,7 @@ static void print_usage(const char* program)
     printf("  -p: Process (fork) test\n");
     printf("  -s: Socket server test\n");
     printf("  -c: Socket client test\n");
+    printf("  -t: Thread test\n");
 }
 
 /**
@@ -113,12 +114,12 @@ static void test_fork(void)
     {
         // 子进程
         for (int i = 0; i < 100000000; i++); // 子进程忙等待，模拟延时
-        printf("fork child, PID: %d\n", getpid());
+            printf("fork child, PID: %d\n", getpid());
     } 
     else 
     {
         // 父进程
-        printf("fork parent, PID: %d, child PID: %d\n", getpid(), pid);
+            printf("fork parent, PID: %d, child PID: %d\n", getpid(), pid);
     }
     
     printf("=== Fork功能测试完成 ===\n\n");
@@ -251,6 +252,61 @@ static void test_socket_client(void)
     printf("=== Socket客户端测试完成 ===\n\n");
 }
 
+/**
+ * 线程测试函数 - 工作线程
+ */
+static void* thread_worker(void* arg)
+{
+    int thread_num = *(int *)arg;
+    printf("Thread %d: 开始运行\n", thread_num);
+
+    // 模拟工作负载
+    for (int i = 0; i < 3; i++)
+    {
+        printf("Thread %d: 工作中... %d\n", thread_num, i);
+        // 简单的延时循环
+        for (int j = 0; j < 1000000; j++);
+    }
+    
+    printf("Thread %d: 工作完成\n", thread_num);
+    return (void*)(long)thread_num;  // 返回线程号作为返回值
+}
+
+/**
+ * 线程功能测试
+ */
+#define THREAD_NUM 5
+static void test_thread(void)
+{
+    printf("=== 开始线程功能测试 ===\n");    
+    // 使用静态分配
+    static pthread_t threads[THREAD_NUM];
+    static int thread_id[THREAD_NUM] = {[0 ... THREAD_NUM - 1] = 0};
+    
+    // 创建多个线程
+    for (int i = 0; i < THREAD_NUM; i++)
+    {
+        thread_id[i] = i + 1;
+        int ret = pthread_create(&threads[i], NULL, thread_worker, &thread_id[i]);
+        if (ret != 0)
+        {
+            printf("Thread 创建失败\n");
+            continue;
+        }
+    }
+
+    // 等待所有线程完成
+    for (int i = 0; i < THREAD_NUM; i++)
+    {
+        void *ret_val;
+        pthread_join(threads[i], &ret_val);
+        printf("Thread %d: 返回值 = %ld\n", i + 1, (long)ret_val);
+    }
+    
+    printf("=== 线程功能测试完成 ===\n\n");
+}
+
+
 int main(int argc, char *argv[])
 {
     if (argc < 2) 
@@ -286,6 +342,10 @@ int main(int argc, char *argv[])
             
         case 'c':  // socket客户端测试
             test_socket_client();
+            break;
+            
+        case 't':  // 线程测试
+            test_thread();
             break;
             
         default:

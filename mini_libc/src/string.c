@@ -61,3 +61,38 @@ char *itoa(long num, char *str, int radix, unsigned char sign_flag)
     str[i] = '\0'; // 添加字符串结束符
     return str;
 }
+
+/**
+ * 内存拷贝函数
+ * @param dest: 目标内存地址
+ * @param src: 源内存地址
+ * @param n: 要拷贝的字节数
+ * @return: 目标内存地址
+ */
+void *memcpy(void *dest, const void *src, size_t n)
+{
+    unsigned char *d = (unsigned char *)dest;
+    const unsigned char *s = (const unsigned char *)src;
+    
+    // 检查源地址和目标地址是否重叠
+    if ((d <= s) || (d >= (s + n)))
+    {
+        // 从前向后拷贝
+        while (n--)
+        {
+            *d++ = *s++;
+        }
+    }
+    else
+    {
+        // 从后向前拷贝
+        d = d + n - 1;
+        s = s + n - 1;
+        while (n--)
+        {
+            *d-- = *s--;
+        }
+    }
+    
+    return dest;
+}

@@ -52,10 +52,30 @@ typedef unsigned int socklen_t;
 #define MAP_SHARED  0x01                /* Share changes.  */
 #define MAP_PRIVATE 0x02                /* Changes are private.  */
 #define MAP_ANONYMOUS 0x20              /* Don't use a file.  */
+#define MAP_STACK    0x20000            /* Stack mapping.  */
+#define MAP_GROWSDOWN 0x0100            /* Stack grows down.  */
+#define MAP_HUGETLB   0x40000          /* Create huge page mapping.  */
+#define MAP_FIXED     0x10              /* Interpret addr exactly.  */
 #define MAP_FILE     0
 #define MAP_ANON     MAP_ANONYMOUS
 #define MAP_FAILED ((void *)-1)
 #define NULL ((void*)0)
+
+/* clone标志位 */
+#define CLONE_CHILD_CLEARTID     0x00200000  // 子进程退出时清除TID
+#define CLONE_CHILD_SETTID       0x01000000  // 设置子进程的TID
+#define CLONE_PARENT_SETTID      0x00100000  // 设置父进程的TID
+#define CLONE_VM                 0x00000100  // 共享内存空间
+#define CLONE_FS                 0x00000200  // 共享文件系统信息
+#define CLONE_FILES              0x00000400  // 共享文件描述符表
+#define CLONE_SIGHAND            0x00000800  // 共享信号处理函数
+#define CLONE_THREAD             0x00010000  // 同一线程组
+#define CLONE_SYSVSEM            0x00040000   // 共享System V SEM_UNDO语义
+#define CLONE_SETTLS             0x00080000   // 创建新的TLS
+#define CLONE_PARENT_SETTID      0x00100000  // 将TID写入父进程
+#define CLONE_CHILD_CLEARTID     0x00200000  // 清除子进程的TID
+#define CLONE_CHILD_SETTID       0x01000000
+#define CLONE_DETACHED           0x00400000  // 分离状态
 
 /* Socket相关类型和常量 */
 typedef unsigned int socklen_t;
@@ -71,25 +91,35 @@ typedef unsigned int socklen_t;
 #define INADDR_ANY ((unsigned long)0x00000000)
 
 // 网络相关结构体定义
-struct sockaddr {
+struct sockaddr
+{
     unsigned short sa_family;
     char sa_data[14];
 };
 
-struct in_addr {
+struct in_addr
+{
     unsigned long s_addr;
 };
 
-struct sockaddr_in {
+struct sockaddr_in
+{
     short          sin_family;
     unsigned short sin_port;
     struct in_addr sin_addr;
     char           sin_zero[8];
 };
 
+struct timespec 
+{
+    long tv_sec;    /* 秒 */
+    long tv_nsec;   /* 纳秒 */
+};
+
 // 字符串操作函数声明
 int strlen(const char *s);
 char *itoa(long num, char *str, int radix, unsigned char sign_flag);
+void *memcpy(void *dest, const void *src, size_t n);
 
 // 文件操作函数声明
 int write(int fd, const void *buf, int count);
@@ -111,6 +141,7 @@ void* memset(void* s, int c, size_t n);
 // 进程操作函数声明
 int fork(void);
 pid_t getpid(void);
+int clone(int (*fn)(void *), void *stack, int flags, void *arg, ...);
 
 // Socket操作函数声明
 int socket(int domain, int type, int protocol);
@@ -121,5 +152,23 @@ int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
 ssize_t send(int sockfd, const void *buf, size_t len, int flags);
 ssize_t recv(int sockfd, void *buf, size_t len, int flags);
 unsigned short htons(unsigned short hostshort);
+
+/* pthread相关定义 */
+typedef unsigned long pthread_t;
+typedef struct pthread_attr_t {
+    int dummy;  // 暂时不支持线程属性
+} pthread_attr_t;
+
+// pthread函数声明
+int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
+                  void *(*start_routine)(void*), void *arg);
+int pthread_join(pthread_t thread, void **retval);
+
+/* pthread错误码定义 */
+#define EINVAL      22      /* Invalid argument */
+#define EAGAIN      11      /* Try again */
+#define ENOMEM      12      /* Out of memory */
+#define ESRCH       3       /* No such process */
+#define EDEADLK     35      /* Resource deadlock would occur */
 
 #endif

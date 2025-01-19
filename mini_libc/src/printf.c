@@ -1,132 +1,132 @@
+/**
+ * printf.c - 支持多线程和UTF-8的printf实现
+ */
+
 #include "mini_lib.h"
 
-int printf(const char *format, ...)
+/**
+ * 检查是否是UTF-8字符的后续字节
+ */
+static int is_utf8_continuation(unsigned char c)
 {
-    int ret = 0;
+    return (c & 0xC0) == 0x80;
+}
 
-    va_list args;
-    va_start(args, format);
+/**
+ * 获取UTF-8字符的字节数
+ */
+static int get_utf8_char_length(unsigned char c)
+{
+    if ((c & 0x80) == 0) return 1;        // ASCII
+    if ((c & 0xE0) == 0xC0) return 2;     // 2字节UTF-8
+    if ((c & 0xF0) == 0xE0) return 3;     // 3字节UTF-8
+    if ((c & 0xF8) == 0xF0) return 4;     // 4字节UTF-8
+    return 1;  // 无效UTF-8字符当作1字节处理
+}
+
+/**
+ * 格式化输出到缓冲区
+ */
+static int vsprintf(char *buf, const char *format, va_list args)
+{
+    char *str = buf;
+    char num_buf[32];
+    const char *s = format;
     
-    const char *s = NULL;
-    unsigned char find_flag = 0; // 用来标识是否找到一个占位符%
-
-    for (s = format; *s != '\0'; s++)
+    while (*s)
     {
+        if (*s != '%')
+        {
+            // 处理UTF-8字符
+            int char_len = get_utf8_char_length(*s);
+            for (int i = 0; i < char_len && *s; i++)
+            {
+                *str++ = *s++;
+            }
+            continue;
+        }
+        
+        s++;  // 跳过%
+        
+        // 处理格式说明符
         switch (*s)
         {
-            case '%': // 遇到占位符
-                if (find_flag == 0)
+            case 'd':  // 十进制整数
+            {
+                int value = va_arg(args, int);
+                int len = strlen(itoa(value, num_buf, 10, 1));
+                memcpy(str, num_buf, len);
+                str += len;
+                break;
+            }
+            
+            case 'x':  // 十六进制整数
+            {
+                unsigned int value = va_arg(args, unsigned int);
+                int len = strlen(itoa(value, num_buf, 16, 0));
+                memcpy(str, num_buf, len);
+                str += len;
+                break;
+            }
+            
+            case 'l':  // 长整型
+                if (*(s + 1) == 'd')
                 {
-                    find_flag = 1;
-                }
-                else
-                {
-                    write(1, s, 1);
-                    find_flag = 0;
-                    ret++;
+                    long value = va_arg(args, long);
+                    int len = strlen(itoa(value, num_buf, 10, 1));
+                    memcpy(str, num_buf, len);
+                    str += len;
+                    s++;
                 }
                 break;
-            case 'd': // 十进制
-                if (find_flag == 1)
+                
+            case 's':  // 字符串
+            {
+                char *p = va_arg(args, char*);
+                while (*p)
                 {
-                    int tmp_int = va_arg(args, int);
-                    char tmp_str[16] = { 0, 0, 0, 0, 0, 0, 0, 0 , 0, 0, 0, 0, 0, 0, 0 };
-
-                    itoa(tmp_int, tmp_str, 10, 1);
-                    write(1, tmp_str, strlen(tmp_str));
-
-                    find_flag = 0;
-                    ret += strlen(tmp_str);
-                }
-                else
-                {
-                    write(1, s, 1);
-                    ret++;
-                }
-                break;
-            case 'l': // 长整形
-                if (find_flag == 1)
-                {
-                    const char *p = s + 1;
-                    if (*p == 'd') // 十进制
+                    // 处理字符串中的UTF-8字符
+                    int char_len = get_utf8_char_length(*p);
+                    for (int i = 0; i < char_len && *p; i++)
                     {
-                        long tmp_int = va_arg(args, long);
-                        char tmp_str[16] = { 0, 0, 0, 0, 0, 0, 0, 0 , 0, 0, 0, 0, 0, 0, 0 };
-                        itoa(tmp_int, tmp_str, 10, 1);
-                        write(1, tmp_str, strlen(tmp_str));
-                        find_flag = 0;
-                        ret += strlen(tmp_str);
-                        s++;
-                    }
-                    else if (*p == 'x') // 十六进制
-                    {
-                        long tmp_int = va_arg(args, long);
-                        char tmp_str[16] = { 0, 0, 0, 0, 0, 0, 0, 0 , 0, 0, 0, 0, 0, 0, 0 };
-                        itoa(tmp_int, tmp_str, 16, 0);
-                        write(1, tmp_str, strlen(tmp_str));
-                        find_flag = 0;
-                        ret += strlen(tmp_str);
-                        s++;
-                    }
-                    else
-                    {
-                        find_flag = 0;
-                        write(1, s, 1);
-                        ret ++;
+                        *str++ = *p++;
                     }
                 }
-                else
-                {
-                    write(1, s, 1);
-                    ret++;
-                }
                 break;
-            case 'x': // 十六进制
-                if (find_flag == 1)
-                {
-                    int tmp_int = va_arg(args, int);
-                    char tmp_str[16] = { 0, 0, 0, 0, 0, 0, 0, 0 , 0, 0, 0, 0, 0, 0, 0, 0 };
-
-                    itoa(tmp_int, tmp_str, 16, 0);
-                    write(1, tmp_str, strlen(tmp_str));
-
-                    find_flag = 0;
-                    ret += strlen(tmp_str);
-                }
-                else
-                {
-                    write(1, s, 1);
-                    ret++;
-                }
-                break;
-            case 's': // 字符串
-                if (find_flag == 1)
-                {
-                    char *tmp_str = va_arg(args, char *);
-                    write(1, tmp_str, strlen(tmp_str));
-                    find_flag = 0;
-                    ret += strlen(tmp_str);
-                }
-                else
-                {
-                    write(1, s, 1);
-                    ret++;
-                }
-                break;
+            }
+            
             default:
-                if (find_flag == 1)
-                {
-                    find_flag = 0;
-                }
-
-                write(1, s, 1);
-                ret++;
+                *str++ = *s;
                 break;
         }
+        
+        s++;
     }
+    
+    *str = '\0';
+    return str - buf;
+}
 
+/**
+ * 格式化输出到标准输出
+ */
+int printf(const char *format, ...)
+{
+    char buf[1024];  // 输出缓冲区
+    va_list args;
+    int ret;
+        
+    // 格式化字符串
+    va_start(args, format);
+    ret = vsprintf(buf, format, args);
     va_end(args);
-
+    
+    // 写入标准输出
+    if (ret > 0)
+    {
+        write(1, buf, ret);
+    }
+        
     return ret;
 }
 

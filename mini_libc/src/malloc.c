@@ -169,7 +169,8 @@ static block_t* split_block(buddy_allocator_t* allocator, block_t* block, int ta
         uintptr_t buddy_addr = block_addr + block_size;
         
         // 验证buddy_addr的有效性
-        if (buddy_addr + block_size > (uintptr_t)allocator->heap_start + allocator->heap_size) {
+        if (buddy_addr + block_size > (uintptr_t)allocator->heap_start + allocator->heap_size)
+        {
             break;
         }
         
@@ -398,8 +399,7 @@ void* malloc(size_t size)
     }
 
     // 7. 如果找到的块比需要的大，进行分割
-    // 分割会创建伙伴块并将多余的部分加入到对应的空闲链表
-    if (current_order > order) 
+    if (block && current_order > order && current_order < MAX_ORDER)
     {
         block = split_block(allocator, block, order);
     }

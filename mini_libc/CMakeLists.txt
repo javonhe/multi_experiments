@@ -25,8 +25,10 @@ set(MINI_LIBC_SRC
     src/brk.c 
     src/mmap.c 
     src/malloc.c
-    src/fork.c     # 添加fork.c
+    src/clone.c
+    src/fork.c 
     src/socket.c
+    src/pthread.c
 )
 
 set(TEST_MINI_LIBC test/test_mini_lib.c)
