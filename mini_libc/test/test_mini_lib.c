@@ -24,6 +24,7 @@ static void print_usage(const char* program)
     printf("  -s: Socket server test\n");
     printf("  -c: Socket client test\n");
     printf("  -t: Thread test\n");
+    printf("  -l: 互斥锁测试\n");
 }
 
 /**
@@ -306,6 +307,108 @@ static void test_thread(void)
     printf("=== 线程功能测试完成 ===\n\n");
 }
 
+/**
+ * 互斥锁测试函数 - 工作线程
+ */
+static void* mutex_worker(void* arg)
+{
+    pthread_mutex_t *mutex = (pthread_mutex_t*)arg;
+    int tid = gettid();  // 直接使用系统调用获取线程ID
+    
+    printf("Thread %d: 尝试获取锁\n", tid);
+    
+    // 测试加锁
+    if (pthread_mutex_lock(mutex) != 0)
+    {
+        printf("Thread %d: 加锁失败\n", tid);
+        return (void*)-1;
+    }
+    
+    printf("Thread %d: 获得锁\n", tid);
+    
+    // 模拟临界区操作
+    for (int i = 0; i < 3; i++)
+    {
+        printf("Thread %d: 在临界区工作...%d\n", tid, i);
+        for (int j = 0; j < 1000000; j++); // 模拟工作
+    }
+    
+    // 测试解锁
+    if (pthread_mutex_unlock(mutex) != 0)
+    {
+        printf("Thread %d: 解锁失败\n", tid);
+        return (void*)-1;
+    }
+    
+    printf("Thread %d: 释放锁\n", tid);
+    return (void*)0;
+}
+
+/**
+ * 互斥锁功能测试
+ */
+static void test_mutex(void)
+{
+    printf("\n=== 开始互斥锁测试 ===\n");
+    
+    pthread_mutex_t mutex;
+    int ret;
+    
+    // 测试初始化
+    if ((ret = pthread_mutex_init(&mutex, NULL)) != 0)
+    {
+        printf("互斥锁初始化失败: %d\n", ret);
+        return;
+    }
+    printf("互斥锁初始化成功\n");
+    
+    // 测试单线程加锁/解锁
+    printf("\n[测试1] 单线程加锁/解锁:\n");
+    if (pthread_mutex_lock(&mutex) == 0)
+    {
+        printf("主线程: 第一次加锁成功\n");
+        
+        // 测试重入锁
+        if (pthread_mutex_lock(&mutex) != 0)
+        {
+            printf("主线程: 重入锁检查成功（预期失败）\n");
+        }
+        
+        pthread_mutex_unlock(&mutex);
+        printf("主线程: 解锁成功\n");
+    }
+    
+    // 测试多线程竞争
+    printf("\n[测试2] 多线程竞争测试:\n");
+    #define MUTEX_THREAD_NUM 3
+    pthread_t threads[MUTEX_THREAD_NUM];
+    
+    // 创建多个工作线程
+    for (int i = 0; i < MUTEX_THREAD_NUM; i++)
+    {
+        pthread_create(&threads[i], NULL, mutex_worker, &mutex);
+    }
+    
+    // 等待所有线程完成
+    for (int i = 0; i < MUTEX_THREAD_NUM; i++)
+    {
+        void *retval;
+        pthread_join(threads[i], &retval);
+        printf("线程 %d 退出状态: %ld\n", i+1, (long)retval);
+    }
+    
+    // 测试错误解锁
+    printf("\n[测试3] 错误解锁测试:\n");
+    int fake_tid = 999;
+    mutex.owner = fake_tid;  // 设置错误的所有者
+    ret = pthread_mutex_unlock(&mutex);
+    if (ret != 0)
+    {
+        printf("非持有者解锁测试成功 (返回值: %d)\n", ret);
+    }
+    
+    printf("=== 互斥锁测试完成 ===\n\n");
+}
 
 int main(int argc, char *argv[])
 {
@@ -346,6 +449,10 @@ int main(int argc, char *argv[])
             
         case 't':  // 线程测试
             test_thread();
+            break;
+            
+        case 'l':  // 互斥锁测试
+            test_mutex();
             break;
             
         default:

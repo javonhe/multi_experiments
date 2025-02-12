@@ -11,6 +11,8 @@
 /* 系统调用号定义 */
 #define __NR_exit     93
 #define __NR_futex    98   // futex系统调用号
+#define __NR_gettid  178
+
 
 /* futex操作 */
 #define FUTEX_WAIT 0
@@ -36,29 +38,26 @@ struct thread_start_args
 
 };
 
+
+
 /**
- * futex系统调用包装函数
+ * 获取线程ID - 直接使用系统调用
  */
-static int futex(int *uaddr, int futex_op, int val,
-                const struct timespec *timeout, int *uaddr2, int val3)
+int gettid(void)
 {
-    register long x8 asm("x8") = __NR_futex;
-    register long x0 asm("x0") = (long)uaddr;
-    register long x1 asm("x1") = futex_op;
-    register long x2 asm("x2") = val;
-    register long x3 asm("x3") = (long)timeout;
-    register long x4 asm("x4") = (long)uaddr2;
-    register long x5 asm("x5") = val3;
+    register long x8 asm("x8") = __NR_gettid;
+    register long x0 asm("x0");
     
     asm volatile(
         "svc #0"
-        : "+r"(x0)
-        : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5)
+        : "=r"(x0)
+        : "r"(x8)
         : "memory", "cc"
     );
     
-    return x0;
+    return (int)x0;
 }
+
 
 /**
  * 线程启动包装函数

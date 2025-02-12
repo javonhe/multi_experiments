@@ -28,6 +28,7 @@ set(MINI_LIBC_SRC
     src/clone.c
     src/fork.c 
     src/socket.c
+    src/lock.c
     src/pthread.c
 )
 

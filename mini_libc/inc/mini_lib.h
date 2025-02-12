@@ -116,6 +116,54 @@ struct timespec
     long tv_nsec;   /* 纳秒 */
 };
 
+/* pthread相关定义 */
+typedef unsigned long pthread_t;
+typedef struct pthread_attr_t {
+    int dummy;  // 暂时不支持线程属性
+} pthread_attr_t;
+
+/* 错误码定义 */
+#define EINVAL      22      /* Invalid argument */
+#define EAGAIN      11      /* Try again */
+#define ENOMEM      12      /* Out of memory */
+#define ESRCH       3       /* No such process */
+#define EINTR       4       /* 系统调用被中断 */
+#define EDEADLK     35      /* Resource deadlock would occur */
+
+/* 互斥锁相关定义 */
+typedef struct pthread_mutex_t {
+    /*
+     * 内存布局:
+     * +------------------------+ <-- 64字节对齐
+     * |          lock         |     4字节
+     * |         (0/1)         |
+     * +------------------------+
+     * |         owner         |     4字节
+     * |    (线程ID/0表示无)    |
+     * +------------------------+
+     * |                       |
+     * |        padding        |     56字节填充
+     * |                       |
+     * +------------------------+ <-- 总64字节
+     * - lock: 占用4字节,使用64字节对齐以避免伪共享
+     *   - 值为0表示锁未被持有
+     *   - 值为1表示锁已被持有
+     * - owner: 占用4字节,紧跟在lock后面
+     *   - 值为0表示无持有者
+     *   - 非0值表示持有锁的线程ID
+     * 
+     * 总大小: 8字节,但由于64字节对齐,实际占用64字节
+     */
+    volatile int lock __attribute__((aligned(64)));  // 避免伪共享
+    volatile int owner;
+} pthread_mutex_t;
+
+typedef struct pthread_mutexattr_t {
+    int type;
+} pthread_mutexattr_t;
+
+#define PTHREAD_MUTEX_INITIALIZER { 0, 0 }
+
 // 字符串操作函数声明
 int strlen(const char *s);
 char *itoa(long num, char *str, int radix, unsigned char sign_flag);
@@ -153,22 +201,25 @@ ssize_t send(int sockfd, const void *buf, size_t len, int flags);
 ssize_t recv(int sockfd, void *buf, size_t len, int flags);
 unsigned short htons(unsigned short hostshort);
 
-/* pthread相关定义 */
-typedef unsigned long pthread_t;
-typedef struct pthread_attr_t {
-    int dummy;  // 暂时不支持线程属性
-} pthread_attr_t;
 
 // pthread函数声明
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr,
                   void *(*start_routine)(void*), void *arg);
 int pthread_join(pthread_t thread, void **retval);
 
-/* pthread错误码定义 */
-#define EINVAL      22      /* Invalid argument */
-#define EAGAIN      11      /* Try again */
-#define ENOMEM      12      /* Out of memory */
-#define ESRCH       3       /* No such process */
-#define EDEADLK     35      /* Resource deadlock would occur */
+// 互斥锁相关函数声明
+int futex(volatile int *uaddr, int futex_op, int val,
+                       const struct timespec *timeout, int *uaddr2, int val3);
+int pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr);
+int pthread_mutex_lock(pthread_mutex_t *mutex);
+int pthread_mutex_unlock(pthread_mutex_t *mutex);
+
+// 添加错误码定义
+#define MINI_EBUSY    1
+#define MINI_EINVAL   2
+#define MINI_EDEADLK  3
+
+// 系统调用声明
+int gettid(void);
 
 #endif
