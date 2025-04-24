@@ -96,3 +96,28 @@ void *memcpy(void *dest, const void *src, size_t n)
     
     return dest;
 }
+
+/**
+ * 字符串比较函数
+ * 
+ * 比较两个字符串，按照字典序比较
+ * 
+ * @param s1: 第一个字符串
+ * @param s2: 第二个字符串
+ * @return: 
+ *   - 如果s1 < s2，返回负值
+ *   - 如果s1 = s2，返回0
+ *   - 如果s1 > s2，返回正值
+ */
+int strcmp(const char *s1, const char *s2)
+{
+    // 同时遍历两个字符串，直到遇到不同字符或字符串结束
+    while (*s1 && (*s1 == *s2))
+    {
+        s1++;
+        s2++;
+    }
+    
+    // 返回两个字符的ASCII差值
+    return *(const unsigned char*)s1 - *(const unsigned char*)s2;
+}
