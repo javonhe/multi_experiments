@@ -27,7 +27,7 @@ static int get_utf8_char_length(unsigned char c)
 /**
  * 格式化输出到缓冲区
  */
-static int vsprintf(char *buf, const char *format, va_list args)
+int vsprintf(char *buf, const char *format, va_list args)
 {
     char *str = buf;
     char num_buf[32];
@@ -127,6 +127,21 @@ int printf(const char *format, ...)
         write(1, buf, ret);
     }
         
+    return ret;
+}
+
+/**
+ * 格式化输出到缓冲区
+ */
+int sprintf(char *buf, const char *format, ...)
+{
+    va_list args;
+    int ret;
+    
+    va_start(args, format);
+    ret = vsprintf(buf, format, args);
+    va_end(args);
+    
     return ret;
 }
 
