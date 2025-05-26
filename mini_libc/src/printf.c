@@ -145,4 +145,46 @@ int sprintf(char *buf, const char *format, ...)
     return ret;
 }
 
+/**
+ * 带长度限制的格式化输出到缓冲区
+ */
+int vsnprintf(char *buf, size_t size, const char *format, va_list args)
+{
+    if (!buf || !format || size == 0)
+    {
+        return -1;
+    }
+
+    // 使用临时缓冲区
+    char temp[1024];
+    int ret = vsprintf(temp, format, args);
+    
+    // 如果格式化失败或结果太长，返回错误
+    if (ret < 0 || ret >= size)
+    {
+        return -1;
+    }
+    
+    // 复制到目标缓冲区
+    memcpy(buf, temp, ret);
+    buf[ret] = '\0';
+    
+    return ret;
+}
+
+/**
+ * 带长度限制的格式化输出到缓冲区
+ */
+int snprintf(char *buf, size_t size, const char *format, ...)
+{
+    va_list args;
+    int ret;
+    
+    va_start(args, format);
+    ret = vsnprintf(buf, size, format, args);
+    va_end(args);
+    
+    return ret;
+}
+
 
