@@ -19,10 +19,6 @@
                                                growsdown vma (mprotect only).  */
 #define PROT_GROWSUP        0x02000000      /* Extend change to start of
                                                growsup vma (mprotect only).  */
-#define va_list __builtin_va_list
-#define va_start(ap, last) __builtin_va_start(ap, last)
-#define va_arg(ap, type) __builtin_va_arg(ap, type)
-#define va_end(ap) __builtin_va_end(ap)
 
 #define __MINI_ALIGN(__value, __alignment) (((__value) + (__alignment)-1) & ~((__alignment)-1))
 
@@ -39,12 +35,21 @@ typedef long ssize_t;
 typedef unsigned long uintptr_t;
 typedef int pid_t;
 typedef unsigned int socklen_t;
+typedef unsigned long uint64_t;
+typedef unsigned short uint16_t;
+typedef unsigned int uint32_t;
+typedef long int64_t;
 
 // 变长参数相关定义
 #define va_list __builtin_va_list
 #define va_start(ap, last) __builtin_va_start(ap, last)
 #define va_arg(ap, type) __builtin_va_arg(ap, type)
 #define va_end(ap) __builtin_va_end(ap)
+
+// 日志级别定义
+#define LOG_LEVEL_DEBUG 0
+#define LOG_LEVEL_INFO  1
+#define LOG_LEVEL_ERROR 2
 
 // mmap相关常量定义
 #define PROT_READ  0x1
@@ -168,14 +173,20 @@ typedef struct pthread_mutexattr_t {
 int strlen(const char *s);
 char *itoa(long num, char *str, int radix, unsigned char sign_flag);
 void *memcpy(void *dest, const void *src, size_t n);
-
+int strcmp(const char *s1, const char *s2);
 // 文件操作函数声明
 int write(int fd, const void *buf, int count);
+ssize_t read(int fd, void *buf, size_t count);
 int open(const char *pathname, int flags, int mode);
 int close(int fd);
 int lseek(int fd, int offset, int whence);
 // 打印函数声明
 int printf(const char *format, ...);
+int vsprintf(char *buf, const char *format, va_list args);
+int sprintf(char *buf, const char *format, ...);
+int vsnprintf(char *buf, size_t size, const char *format, va_list args);
+int snprintf(char *buf, size_t size, const char *format, ...);
+
 
 // 内存管理函数声明
 int brk(void *end_data);
@@ -221,5 +232,14 @@ int pthread_mutex_unlock(pthread_mutex_t *mutex);
 
 // 系统调用声明
 int gettid(void);
+
+// 日志相关函数声明
+void set_log_level(int level);
+void log_output(int level, const char *file, const char *func, int line, const char *fmt, ...);
+
+// 日志宏定义
+#define LOG_DEBUG(fmt, ...) log_output(LOG_LEVEL_DEBUG, __FILE__, __func__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_INFO(fmt, ...)  log_output(LOG_LEVEL_INFO, __FILE__, __func__, __LINE__, fmt, ##__VA_ARGS__)
+#define LOG_ERROR(fmt, ...) log_output(LOG_LEVEL_ERROR, __FILE__, __func__, __LINE__, fmt, ##__VA_ARGS__)
 
 #endif

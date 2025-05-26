@@ -1,5 +1,6 @@
  .text
  .global _mini_libc_entry
+ .type _mini_libc_entry, @function  //声明_mini_libc_entry是一个函数
  
  _mini_libc_entry:
  ldr x0, [sp, #0] //获取argc
