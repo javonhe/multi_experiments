@@ -50,12 +50,16 @@ target_link_libraries(test_mini_libc mini_libc)
 set_target_properties(test_mini_libc PROPERTIES
     LINK_FLAGS "-static")
 
-# 添加动态链接器可执行文件
-add_executable(dynamic_linker src/dynamic_linker.c)
-set_target_properties(dynamic_linker PROPERTIES
-    LINK_FLAGS "-static -nostdlib"
+
+# 添加动态链接器共享库（作为解释器，由内核调用）
+add_library(dynamic_linker_shared SHARED src/dynamic_linker.c src/dynamic_entry.S)
+set_target_properties(dynamic_linker_shared PROPERTIES
+    OUTPUT_NAME "dynamic_linker"
+    POSITION_INDEPENDENT_CODE ON
+    LINK_FLAGS "-nostdlib -static -Wl,-e,_start -Wl,-Bsymbolic -Wl,-z,now"
+    COMPILE_FLAGS "-fno-plt -fPIC"
 )
-target_link_libraries(dynamic_linker mini_libc)
+target_link_libraries(dynamic_linker_shared mini_libc)
 
 # 添加动态库版本的mini_libc
 add_library(mini_libc_shared SHARED ${MINI_LIBC_SRC})
@@ -65,13 +69,19 @@ set_target_properties(mini_libc_shared PROPERTIES
     LINK_FLAGS "-nostdlib -shared -Wl,-export-dynamic")
 
 # 添加动态链接版本的test_mini_libc
-add_executable(test_mini_libc_dynamic ${TEST_MINI_LIBC} src/dynamic_entry.S)
+# 使用 mini_libc_entry.S 作为用户程序的入口点
+add_executable(test_mini_libc_dynamic ${TEST_MINI_LIBC} src/mini_libc_entry.S)
+# 设置动态链接器路径，使用绝对路径
+set(DYNAMIC_LINKER_PATH "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/libdynamic_linker.so")
 set_target_properties(test_mini_libc_dynamic PROPERTIES
-    LINK_FLAGS "-nostdlib -Wl,--entry=_dynamic_entry -Wl,-rpath,'$ORIGIN'")
+    LINK_FLAGS "-nostdlib -Wl,--entry=_mini_libc_entry -Wl,-rpath,${CMAKE_RUNTIME_OUTPUT_DIRECTORY} -Wl,--dynamic-linker,${DYNAMIC_LINKER_PATH}")
 target_link_libraries(test_mini_libc_dynamic mini_libc_shared)
 
 # 添加自定义命令，复制动态库到可执行文件目录，确保动态库可以被找到
 add_custom_command(TARGET test_mini_libc_dynamic POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
     ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libmini_libc.so
-    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/libmini_libc.so)
+    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/libmini_libc.so
+    COMMAND ${CMAKE_COMMAND} -E copy
+    ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libdynamic_linker.so
+    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/libdynamic_linker.so)

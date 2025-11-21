@@ -1,16 +1,16 @@
-.global _dynamic_entry
-.type _dynamic_entry, @function
+.text
+.global _start
+.type _start, @function
 
-_dynamic_entry:
-    # 保存链接寄存器
-    stp x29, x30, [sp, #-16]!
-    mov x29, sp
+_start:
+    # 内核调用解释器时，参数通过栈传递
+    # 直接将栈指针传递给 main 函数，让 C 代码解析
+    # main(void *stack_pointer)
+    mov x0, sp
+    bl main
     
-    # 调用动态库中的初始化函数
-    bl _mini_libc_entry
-    
-    # 恢复链接寄存器并返回
-    ldp x29, x30, [sp], #16
-    ret
-    
-.size _dynamic_entry, .-_dynamic_entry
+    # main 函数返回后，使用返回值作为退出码, 返回值在x0中
+    # __NR_exit 系统调用号为 93 (AArch64)
+    # 注意：x0 已经包含 main 的返回值
+    mov x8, #93
+    svc #0

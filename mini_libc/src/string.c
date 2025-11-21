@@ -121,3 +121,33 @@ int strcmp(const char *s1, const char *s2)
     // 返回两个字符的ASCII差值
     return *(const unsigned char*)s1 - *(const unsigned char*)s2;
 }
+
+
+/**
+ * 字符串比较函数（带长度限制）
+ * 
+ * 比较两个字符串，按照字典序比较，最多比较n个字符
+ * 
+ * @param s1: 第一个字符串
+ * @param s2: 第二个字符串
+ * @param n: 要比较的字符数
+ * @return: 
+ *   - 如果s1 < s2，返回负值
+ *   - 如果s1 = s2，返回0
+ *   - 如果s1 > s2，返回正值
+ */
+int strncmp(const char *s1, const char *s2, size_t n)
+{
+    while (n-- && *s1 && (*s1 == *s2))
+    {
+        s1++;
+        s2++;
+    }
+    
+    if (n == (size_t)-1)
+    {
+        return 0;
+    }
+    
+    return *(const unsigned char*)s1 - *(const unsigned char*)s2;
+}

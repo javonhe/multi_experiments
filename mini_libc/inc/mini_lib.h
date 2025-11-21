@@ -174,6 +174,7 @@ int strlen(const char *s);
 char *itoa(long num, char *str, int radix, unsigned char sign_flag);
 void *memcpy(void *dest, const void *src, size_t n);
 int strcmp(const char *s1, const char *s2);
+int strncmp(const char *s1, const char *s2, size_t n);
 // 文件操作函数声明
 int write(int fd, const void *buf, int count);
 ssize_t read(int fd, void *buf, size_t count);

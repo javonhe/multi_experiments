@@ -1,244 +1,311 @@
-/**
- * dynamic_linker.c - aarch64平台动态链接器实现
- * 
- * 本文件实现了一个简单的动态链接器，用于加载和链接ELF格式的可执行文件和共享库。
- * 主要功能包括：
- * 1. 解析ELF文件头和程序头
- * 2. 加载可执行文件和共享库到内存
- * 3. 处理重定位表
- * 4. 解析和链接符号
- * 
- * 实现原理：
- * 1. 文件加载：
- *    - 使用mmap将ELF文件映射到内存
- *    - 根据程序头表(Program Headers)设置内存权限
- *    - 处理LOAD、DYNAMIC等段
- * 
- * 2. 符号解析：
- *    - 维护全局符号表
- *    - 按照依赖顺序解析符号
- *    - 处理未定义符号和弱符号
- * 
- * 3. 重定位处理：
- *    - 支持R_AARCH64_GLOB_DAT、R_AARCH64_JUMP_SLOT等重定位类型
- *    - 计算符号的实际地址
- *    - 修正GOT/PLT表项
- */
-
 #include "mini_lib.h"
 
-// ELF文件类型
-#define ET_NONE     0       // 未知类型
-#define ET_REL      1       // 可重定位文件
-#define ET_EXEC     2       // 可执行文件
-#define ET_DYN      3       // 共享目标文件
-#define ET_CORE     4       // Core文件
-
-// ELF机器类型
-#define EM_AARCH64  183     // ARM 64位架构
-
-// 程序头类型
-#define PT_NULL     0       // 未使用
-#define PT_LOAD     1       // 可加载段
-#define PT_DYNAMIC  2       // 动态链接信息
-#define PT_INTERP   3       // 程序解释器
-#define PT_NOTE     4       // 辅助信息
-#define PT_PHDR     6       // 程序头表
-
-// 动态表项类型
-#define DT_NULL     0       // 标记动态段结束
-#define DT_NEEDED   1       // 需要的共享库
-#define DT_PLTRELSZ 2       // PLT重定位项大小
-#define DT_PLTGOT   3       // PLT/GOT地址
-#define DT_HASH     4       // 符号哈希表
-#define DT_STRTAB   5       // 字符串表
-#define DT_SYMTAB   6       // 符号表
-#define DT_RELA     7       // 重定位表
-#define DT_RELASZ   8       // 重定位表大小
-#define DT_RELAENT  9       // 重定位项大小
-#define DT_STRSZ    10      // 字符串表大小
-#define DT_SYMENT   11      // 符号表项大小
-#define DT_INIT     12      // 初始化函数
-#define DT_FINI     13      // 终止函数
-#define DT_SONAME   14      // 共享库名称
-#define DT_RPATH    15      // 运行时库搜索路径
-#define DT_SYMBOLIC 16      // 改变符号解析顺序
-#define DT_REL      17      // 重定位表
-#define DT_RELSZ    18      // 重定位表大小
-#define DT_RELENT   19      // 重定位项大小
-
-// ELF符号绑定类型
-#define STB_LOCAL   0       // 局部符号
-#define STB_GLOBAL  1       // 全局符号
-#define STB_WEAK    2       // 弱符号
-#define STB_NUM     3       // 符号绑定数量
-
-// ELF符号类型
-#define STT_NOTYPE  0       // 未指定类型
-#define STT_OBJECT  1       // 数据对象
-#define STT_FUNC    2       // 函数入口点
-#define STT_SECTION 3       // 节
-#define STT_FILE    4       // 源文件名
-#define STT_COMMON  5       // 未初始化的公共块
-#define STT_TLS     6       // 线程局部存储
-
-// 特殊节索引
-#define SHN_UNDEF   0       // 未定义节
-#define SHN_ABS     0xfff1  // 绝对值
-#define SHN_COMMON  0xfff2  // 公共块
-
-// AArch64重定位类型
-#define R_AARCH64_NONE          0
-#define R_AARCH64_GLOB_DAT      1025
-#define R_AARCH64_JUMP_SLOT     1026
-#define R_AARCH64_RELATIVE      1027
-
-// ELF段权限标志
-#define PF_X        0x1     // 可执行
-#define PF_W        0x2     // 可写
-#define PF_R        0x4     // 可读
-#define PF_MASKOS   0x0ff00000  // OS特定
-#define PF_MASKPROC 0xf0000000  // 处理器特定
-
-// ELF头结构体定义
-typedef struct 
-{
-    unsigned char e_ident[16];    // ELF标识
-    uint16_t    e_type;          // 文件类型
-    uint16_t    e_machine;       // 机器类型
-    uint32_t    e_version;       // 文件版本
-    uint64_t    e_entry;         // 入口点地址
-    uint64_t    e_phoff;         // 程序头表偏移
-    uint64_t    e_shoff;         // 节头表偏移
-    uint32_t    e_flags;         // 处理器特定标志
-    uint16_t    e_ehsize;        // ELF头大小
-    uint16_t    e_phentsize;     // 程序头表项大小
-    uint16_t    e_phnum;         // 程序头表项数量
-    uint16_t    e_shentsize;     // 节头表项大小
-    uint16_t    e_shnum;         // 节头表项数量
-    uint16_t    e_shstrndx;      // 节名字符串表索引
-} Elf64_Ehdr;
-
-// 程序头结构体
-typedef struct 
-{
-    uint32_t    p_type;          // 段类型
-    uint32_t    p_flags;         // 段标志
-    uint64_t    p_offset;        // 段在文件中的偏移
-    uint64_t    p_vaddr;         // 段的虚拟地址
-    uint64_t    p_paddr;         // 段的物理地址
-    uint64_t    p_filesz;        // 段在文件中的大小
-    uint64_t    p_memsz;         // 段在内存中的大小
-    uint64_t    p_align;         // 段对齐
-} Elf64_Phdr;
-
-// 动态表项结构体
-typedef struct 
-{
-    uint64_t    d_tag;           // 动态项类型
-    union 
-    {
-        uint64_t d_val;          // 整数值
-        uint64_t d_ptr;          // 地址值
-    } d_un;
-} Elf64_Dyn;
-
-// 重定位项结构体
-typedef struct 
-{
-    uint64_t    r_offset;        // 重定位位置
-    uint64_t    r_info;          // 重定位类型和符号
-    int64_t     r_addend;        // 常量加数
-} Elf64_Rela;
-
-// 符号表项结构体
-typedef struct 
-{
-    uint32_t    st_name;         // 符号名称
-    unsigned char st_info;        // 符号类型和绑定
-    unsigned char st_other;       // 符号可见性
-    uint16_t    st_shndx;        // 符号所在节
-    uint64_t    st_value;        // 符号值
-    uint64_t    st_size;         // 符号大小
-} Elf64_Sym;
-
-// 加载器上下文相关结构定义
-typedef struct LoadedObject 
-{
-    char *path;              // 文件路径
-    void *base;              // 加载基址
-    uint64_t base_offset;    // 基址偏移量(实际基址 - 预期基址)
-    Elf64_Dyn *dynamic;      // 动态段
-    size_t size;             // 映射大小
-    void *entry;             // 入口点
-    struct LoadedObject *next;
-} LoadedObject;
-
-typedef struct SymbolEntry 
-{
-    const char *name;        // 符号名
-    uint64_t value;          // 符号值
-    struct LoadedObject *obj; // 所属对象
-    struct SymbolEntry *next;
-} SymbolEntry;
-
-typedef struct 
-{
-    struct LoadedObject *loaded_objects;
-    struct SymbolEntry *symbols;
-    char *error;                 // 错误信息
-    char *interp;               // 解释器路径
-} LoaderContext;
-
-static LoaderContext g_ctx = {0};
-
-#define MAX_SEARCH_PATHS 32
-#define MAX_PATH_LEN 256
-
-// 动态库搜索路径结构
-typedef struct 
-{
-    char *paths[MAX_SEARCH_PATHS];  // 搜索路径数组
-    int count;                      // 当前路径数量
-} SearchPaths;
-
-static SearchPaths g_search_paths = {0};
-
-// 文件访问权限检查
-#define F_OK 0
-
-// 全局变量存储环境变量
+// 全局变量：保存环境变量指针
 static char **g_environ = NULL;
 
+// 辅助向量 (auxv) 类型定义
+typedef struct {
+    uint64_t tag;
+    uint64_t value;
+} AuxvEntry;
+
+// 辅助向量标签定义 (AT_*)
+#define AT_NULL      0    // 结束标记
+#define AT_IGNORE    1    // 忽略
+#define AT_EXECFD    2    // 可执行文件描述符
+#define AT_PHDR      3    // 程序头表地址
+#define AT_PHENT     4    // 程序头表项大小
+#define AT_PHNUM     5    // 程序头表项数量
+#define AT_PAGESZ    6    // 页大小
+#define AT_BASE      7    // 动态链接器基址
+#define AT_FLAGS     8    // 标志
+#define AT_ENTRY     9    // 可执行文件入口点
+#define AT_NOTELF    10   // 不是 ELF 文件
+#define AT_UID       11   // 用户 ID
+#define AT_EUID      12   // 有效用户 ID
+#define AT_GID       13   // 组 ID
+#define AT_EGID      14   // 有效组 ID
+#define AT_PLATFORM  15   // 平台字符串
+#define AT_HWCAP     16   // 硬件能力
+#define AT_CLKTCK    17   // 时钟频率
+#define AT_SECURE     23   // 安全模式
+#define AT_RANDOM    25   // 随机数种子
+#define AT_EXECFN    31   // 可执行文件路径
+
+// 全局变量：保存重要的 auxv 值
+static uint64_t g_auxv_entry = 0;      // AT_ENTRY: 可执行文件入口点
+static uint64_t g_auxv_phdr = 0;       // AT_PHDR: 程序头表地址
+static uint64_t g_auxv_phent = 0;      // AT_PHENT: 程序头表项大小
+static uint64_t g_auxv_phnum = 0;      // AT_PHNUM: 程序头表项数量
+static uint64_t g_auxv_pagesz = 0;     // AT_PAGESZ: 页大小
+static uint64_t g_auxv_base = 0;       // AT_BASE: 动态链接器基址
+static const char *g_auxv_platform = NULL;  // AT_PLATFORM: 平台字符串
+static const char *g_auxv_execfn = NULL;     // AT_EXECFN: 可执行文件路径
+
+
 /**
- * 检查文件是否存在
- * 
- * @param path: 文件路径
- * @return: 文件存在返回0，不存在返回-1
+ * 简单的字符串长度函数（不使用 PLT）
  */
-static int file_exists(const char *path)
+static size_t strlen_simple(const char *s)
 {
-    int fd = open(path, O_RDONLY, 0);
-    if (fd >= 0) 
+    size_t len = 0;
+    while (s[len] != '\0')
     {
-        close(fd);
-        return 0;
+        len++;
     }
-    return -1;
+    return len;
 }
 
 /**
- * 字符串比较函数(带长度限制)
- * 
- * @param s1: 第一个字符串
- * @param s2: 第二个字符串
- * @param n: 最大比较长度
- * @return: 
- *   - 如果s1 < s2，返回负值
- *   - 如果s1 = s2，返回0
- *   - 如果s1 > s2，返回正值
+ * 将整数转换为十进制字符串（不使用 PLT）
  */
-static int strncmp(const char *s1, const char *s2, size_t n)
+static void itoa_simple(int64_t value, char *buf, int base)
+{
+    char *p = buf;
+    int negative = 0;
+    
+    if (value < 0 && base == 10)
+    {
+        negative = 1;
+        value = -value;
+    }
+    
+    if (value == 0)
+    {
+        *p++ = '0';
+        *p = '\0';
+        return;
+    }
+    
+    // 从低位到高位转换
+    char temp[32];
+    int i = 0;
+    while (value > 0)
+    {
+        int digit = value % base;
+        temp[i++] = (digit < 10) ? ('0' + digit) : ('a' + digit - 10);
+        value /= base;
+    }
+    
+    if (negative)
+    {
+        *p++ = '-';
+    }
+    
+    // 反转字符串
+    while (i > 0)
+    {
+        *p++ = temp[--i];
+    }
+    *p = '\0';
+}
+
+/**
+ * 将无符号整数转换为十六进制字符串（不使用 PLT）
+ */
+static void utoa_hex_simple(uint64_t value, char *buf)
+{
+    char *p = buf;
+    
+    if (value == 0)
+    {
+        *p++ = '0';
+        *p = '\0';
+        return;
+    }
+    
+    // 从低位到高位转换
+    char temp[32];
+    int i = 0;
+    while (value > 0)
+    {
+        int digit = value % 16;
+        temp[i++] = (digit < 10) ? ('0' + digit) : ('a' + digit - 10);
+        value /= 16;
+    }
+    
+    // 反转字符串
+    while (i > 0)
+    {
+        *p++ = temp[--i];
+    }
+    *p = '\0';
+}
+
+/**
+ * 简单的 write 系统调用（不使用 PLT）
+ * AArch64: __NR_write = 64 (0x40)
+ */
+static int write_simple(int fd, const void *buf, size_t count)
+{
+    long result;
+    asm volatile(
+        "mov x8, #0x40\n"           // __NR_write = 64
+        "mov x0, %1\n"              // fd
+        "mov x1, %2\n"              // buf
+        "mov x2, %3\n"              // count
+        "svc #0\n"                  // 系统调用
+        "mov %0, x0\n"              // 返回值
+        : "=r"(result)
+        : "r"(fd), "r"(buf), "r"(count)
+        : "x0", "x1", "x2", "x8"
+    );
+    return (int)result;
+}
+
+
+/**
+ * 简单的 printf 实现（不使用 PLT/GOT）
+ * 支持格式：%s, %d, %x, %p, %c, %%
+ * 
+ * 注意：这是一个简化实现，使用内联汇编获取可变参数
+ */
+static int printf_simple(const char *format, ...)
+{
+    char buffer[1024];
+    char num_buf[32];
+    int buf_pos = 0;
+    
+    // 使用内联汇编获取可变参数
+    // 在 AArch64 上，可变参数通过寄存器 x1-x7 和栈传递
+    // 我们使用 __builtin_va_list 来获取参数
+    __builtin_va_list args;
+    __builtin_va_start(args, format);
+    
+    const char *p = format;
+    
+    while (*p != '\0' && buf_pos < sizeof(buffer) - 1)
+    {
+        if (*p == '%')
+        {
+            p++;
+            switch (*p)
+            {
+                case 's':  // 字符串
+                {
+                    const char *str = __builtin_va_arg(args, const char *);
+                    if (str)
+                    {
+                        size_t len = strlen_simple(str);
+                        if (buf_pos + len < sizeof(buffer) - 1)
+                        {
+                            for (size_t i = 0; i < len; i++)
+                            {
+                                buffer[buf_pos++] = str[i];
+                            }
+                        }
+                    }
+                    break;
+                }
+                case 'd':  // 十进制整数
+                {
+                    int val = __builtin_va_arg(args, int);
+                    itoa_simple(val, num_buf, 10);
+                    size_t len = strlen_simple(num_buf);
+                    if (buf_pos + len < sizeof(buffer) - 1)
+                    {
+                        for (size_t i = 0; i < len; i++)
+                        {
+                            buffer[buf_pos++] = num_buf[i];
+                        }
+                    }
+                    break;
+                }
+                case 'x':  // 十六进制整数（小写）
+                {
+                    unsigned int val = __builtin_va_arg(args, unsigned int);
+                    utoa_hex_simple(val, num_buf);
+                    size_t len = strlen_simple(num_buf);
+                    if (buf_pos + len < sizeof(buffer) - 1)
+                    {
+                        for (size_t i = 0; i < len; i++)
+                        {
+                            buffer[buf_pos++] = num_buf[i];
+                        }
+                    }
+                    break;
+                }
+                case 'p':  // 指针（作为十六进制处理）
+                {
+                    void *val = __builtin_va_arg(args, void *);
+                    buffer[buf_pos++] = '0';
+                    buffer[buf_pos++] = 'x';
+                    utoa_hex_simple((uint64_t)val, num_buf);
+                    size_t len = strlen_simple(num_buf);
+                    if (buf_pos + len < sizeof(buffer) - 1)
+                    {
+                        for (size_t i = 0; i < len; i++)
+                        {
+                            buffer[buf_pos++] = num_buf[i];
+                        }
+                    }
+                    break;
+                }
+                case 'c':  // 字符
+                {
+                    char c = (char)__builtin_va_arg(args, int);  // char 提升为 int
+                    if (buf_pos < sizeof(buffer) - 1)
+                    {
+                        buffer[buf_pos++] = c;
+                    }
+                    break;
+                }
+                case '%':  // 百分号
+                {
+                    if (buf_pos < sizeof(buffer) - 1)
+                    {
+                        buffer[buf_pos++] = '%';
+                    }
+                    break;
+                }
+                case '\n':  // 换行符（方便使用）
+                {
+                    if (buf_pos < sizeof(buffer) - 1)
+                    {
+                        buffer[buf_pos++] = '\n';
+                    }
+                    break;
+                }
+                default:
+                    // 未知格式，原样输出
+                    if (buf_pos < sizeof(buffer) - 1)
+                    {
+                        buffer[buf_pos++] = '%';
+                        if (*p != '\0')
+                        {
+                            buffer[buf_pos++] = *p;
+                        }
+                    }
+                    break;
+            }
+            if (*p != '\0')
+            {
+                p++;
+            }
+        }
+        else
+        {
+            buffer[buf_pos++] = *p++;
+        }
+    }
+    
+    buffer[buf_pos] = '\0';
+    
+    __builtin_va_end(args);
+    
+    // 写入 stdout (fd = 1)
+    if (buf_pos > 0)
+    {
+        return write_simple(1, buffer, buf_pos);
+    }
+    
+    return 0;
+}
+
+/**
+ * 简单的字符串比较函数（带长度限制，不使用 PLT）
+ */
+static int strncmp_simple(const char *s1, const char *s2, size_t n)
 {
     while (n-- && *s1 && (*s1 == *s2))
     {
@@ -255,444 +322,72 @@ static int strncmp(const char *s1, const char *s2, size_t n)
 }
 
 /**
- * 查找字符在字符串中的位置
- * 
- * @param s: 要搜索的字符串
- * @param c: 要查找的字符
- * @return: 找到返回字符在字符串中的位置，否则返回NULL
- */
-static char* strchr(const char *s, int c)
-{
-    while (*s && *s != (char)c)
-    {
-        s++;
-    }
-    
-    return *s == (char)c ? (char*)s : NULL;
-}
-
-/**
- * 获取环境变量值
+ * 获取环境变量值（不使用 PLT）
  * 
  * @param name: 环境变量名
  * @return: 环境变量值，不存在返回NULL
  */
 static char* get_env(const char *name)
 {
+    if (!g_environ || !name) 
+    {
+        return NULL;
+    }
+    
+    size_t name_len = strlen_simple(name);
+    
+    // 遍历环境变量数组
+    for (char **env = g_environ; *env != NULL; env++) 
+    {
+        // 检查变量名是否匹配（比较前 name_len 个字符）
+        if (strncmp_simple(*env, name, name_len) == 0 && (*env)[name_len] == '=') 
+        {
+            // 返回 '=' 后面的值
+            return (*env) + name_len + 1;
+        }
+    }
+    
+    return NULL;
+}
+
+/**
+ * 打印所有环境变量（用于调试）
+ */
+static void print_all_env(void)
+{
     if (!g_environ) 
     {
-        return NULL;
+        return;
     }
     
-    size_t name_len = strlen(name);
-    
-    // 遍历环境变量
-    for (char **env = g_environ; *env; env++) 
+    printf_simple("=== Environment Variables ===\n");
+    for (char **env = g_environ; *env != NULL; env++) 
     {
-        if (strncmp(*env, name, name_len) == 0 && (*env)[name_len] == '=') 
-        {
-            return *env + name_len + 1;
-        }
+        printf_simple("%s\n", *env);
     }
-    
-    return NULL;
+    printf_simple("============================\n");
 }
 
 /**
- * 安全的字符串复制
+ * 获取辅助向量值
  * 
- * @param dest: 目标缓冲区
- * @param src: 源字符串
- * @param size: 缓冲区大小
- * @return: 目标字符串
+ * @param auxv: 辅助向量数组
+ * @param tag: 要查找的标签
+ * @return: 对应的值，不存在返回0
  */
-static char* safe_strncpy(char *dest, const char *src, size_t size)
+static uint64_t get_auxv(uint64_t *auxv, uint64_t tag)
 {
-    if (size == 0) 
-    {
-        return dest;
-    }
-
-    size_t i;
-    for (i = 0; i < size - 1 && src[i]; i++) 
-    {
-        dest[i] = src[i];
-    }
-    dest[i] = '\0';
-    return dest;
-}
-
-/**
- * 安全的格式化字符串
- * 
- * @param str: 目标缓冲区
- * @param size: 缓冲区大小
- * @param format: 格式字符串
- * @param ...: 可变参数
- * @return: 写入的字符数
- */
-static int safe_snprintf(char *str, size_t size, const char *format, ...)
-{
-    if (size == 0) 
+    if (!auxv) 
     {
         return 0;
     }
-
-    // 使用临时缓冲区
-    char temp[1024];
-    va_list args;
-    va_start(args, format);
-    int len = vsprintf(temp, format, args);
-    va_end(args);
-
-    // 确保不超过目标缓冲区大小
-    if (len >= size) 
-    {
-        len = size - 1;
-    }
-
-    // 复制到目标缓冲区
-    memcpy(str, temp, len);
-    str[len] = '\0';
-
-    return len;
-}
-
-/**
- * 字符串分割
- * 
- * @param str: 要分割的字符串
- * @param delim: 分隔符
- * @param saveptr: 保存分割位置的指针
- * @return: 分割后的子字符串
- */
-static char* strtok_r(char *str, const char *delim, char **saveptr)
-{
-    if (!str) 
-    {
-        str = *saveptr;
-    }
     
-    if (!str) 
+    // 遍历辅助向量数组
+    for (uint64_t *p = auxv; p[0] != AT_NULL; p += 2) 
     {
-        return NULL;
-    }
-    
-    // 跳过开头的分隔符
-    while (*str && strchr(delim, *str)) 
-    {
-        str++;
-    }
-    
-    if (!*str) 
-    {
-        *saveptr = NULL;
-        return NULL;
-    }
-    
-    // 找到下一个分隔符
-    char *end = str;
-    while (*end && !strchr(delim, *end)) 
-    {
-        end++;
-    }
-    
-    if (*end) 
-    {
-        *end = '\0';
-        *saveptr = end + 1;
-    }
-    else 
-    {
-        *saveptr = NULL;
-    }
-    
-    return str;
-}
-
-/**
- * 修改内存区域的访问权限
- * 用于设置内存映射区域的读/写/执行权限
- * 
- * @param addr: 要修改权限的内存区域起始地址
- * @param len: 要修改权限的内存区域长度
- * @param prot: 新的访问权限，可以是以下值的组合:
- *             PROT_NONE  - 不可访问
- *             PROT_READ  - 可读
- *             PROT_WRITE - 可写
- *             PROT_EXEC  - 可执行
- * @return: 成功返回0，失败返回-1
- */
-int mprotect(void *addr, size_t len, int prot)
-{
-    register long x8 asm("x8") = 226;  // mprotect系统调用号
-    register long x0 asm("x0") = (long)addr;
-    register long x1 asm("x1") = len;
-    register long x2 asm("x2") = prot;
-    
-    asm volatile(
-        "svc #0"
-        : "+r"(x0)
-        : "r"(x8), "r"(x1), "r"(x2)
-        : "memory", "cc"
-    );
-    
-    if (x0 < 0) {
-        return -1;
-    }
-    
-    return 0;
-}
-
-/**
- * 设置错误信息
- * 用于在发生错误时记录错误原因，便于调试和错误处理
- * 
- * @param msg: 错误信息字符串
- */
-static void set_error(const char *msg) 
-{
-    g_ctx.error = (char*)msg;
-}
-
-/**
- * 清理加载器上下文
- * 释放所有已分配的资源，包括：
- * - 已加载的对象
- * - 符号表
- * - 解释器路径
- * - 内存映射
- */
-static void cleanup_context(void)
-{
-    // 清理已加载的对象
-    struct LoadedObject *obj = g_ctx.loaded_objects;
-    while (obj) 
-    {
-        struct LoadedObject *next = obj->next;
-        if (obj->base) 
+        if (p[0] == tag) 
         {
-            munmap(obj->base, obj->size);  // 解除内存映射
-        }
-        if (obj->path)
-        {
-            free(obj->path);  // 释放路径字符串
-        }
-        free(obj);
-        obj = next;
-    }
-    
-    // 清理符号表
-    struct SymbolEntry *sym = g_ctx.symbols;
-    while (sym) 
-    {
-        struct SymbolEntry *next = sym->next;
-        if (sym->name)
-        {
-            free((void*)sym->name);  // 释放符号名
-        }
-        free(sym);
-        sym = next;
-    }
-    
-    // 清理解释器路径
-    if (g_ctx.interp) 
-    {
-        free(g_ctx.interp);
-    }
-    
-    // 重置上下文
-    g_ctx.loaded_objects = NULL;
-    g_ctx.symbols = NULL;
-    g_ctx.error = NULL;
-    g_ctx.interp = NULL;
-}
-
-/**
- * 查找符号
- * 在全局符号表中查找指定名称的符号
- * 
- * 实现原理：
- * 1. 遍历全局符号表
- * 2. 使用字符串比较查找匹配的符号名
- * 3. 返回找到的符号项或NULL
- * 
- * @param name: 要查找的符号名
- * @return: 找到返回符号项指针，否则返回NULL
- */
-static struct SymbolEntry* find_symbol(const char *name)
-{
-    // 遍历全局符号表查找匹配的符号
-    for (struct SymbolEntry *sym = g_ctx.symbols; sym; sym = sym->next)
-    {
-        if (strcmp(sym->name, name) == 0)
-        {
-            return sym;
-        }
-    }
-    return NULL;
-}
-
-/**
- * 添加符号到全局符号表
- * 
- * 实现原理：
- * 1. 分配新的符号表项
- * 2. 复制符号名
- * 3. 设置符号值和所属对象
- * 4. 将符号添加到全局符号表
- * 
- * @param name: 符号名
- * @param value: 符号值（通常是地址）
- * @param obj: 符号所属的加载对象
- * @return: 成功返回0，失败返回-1
- */
-static int add_symbol(const char *name, uint64_t value, struct LoadedObject *obj)
-{
-    // 分配新的符号表项
-    struct SymbolEntry *entry = malloc(sizeof(*entry));
-    if (!entry)
-    {
-        set_error("Failed to allocate symbol entry");
-        return -1;
-    }
-    
-    // 复制符号名
-    char *name_copy = malloc(strlen(name) + 1);
-    if (!name_copy)
-    {
-        free(entry);
-        set_error("Failed to allocate symbol name");
-        return -1;
-    }
-    
-    // 初始化符号表项
-    memcpy(name_copy, name, strlen(name) + 1);
-    entry->name = name_copy;
-    entry->value = value;
-    entry->obj = obj;
-    
-    // 添加到符号表头部
-    entry->next = g_ctx.symbols;
-    g_ctx.symbols = entry;
-    
-    return 0;
-}
-
-/**
- * 处理重定位表
- * 修正代码中的地址引用，使其指向正确的目标位置
- * 
- * 实现原理：
- * 1. 从动态段获取重定位相关信息
- * 2. 遍历重定位表
- * 3. 根据重定位类型进行不同的处理：
- *    - R_AARCH64_GLOB_DAT: 全局数据引用
- *    - R_AARCH64_JUMP_SLOT: 函数调用跳转表
- *    - R_AARCH64_RELATIVE: 相对地址重定位
- * 
- * @param obj: 要处理重定位的加载对象
- * @return: 成功返回0，失败返回-1
- */
-static int process_relocations(struct LoadedObject *obj)
-{
-    if (!obj->dynamic) 
-    {
-        return 0;  // 没有动态段，不需要重定位
-    }
-    
-    // 获取重定位相关的表
-    const char *strtab = NULL;     // 字符串表
-    Elf64_Sym *symtab = NULL;      // 符号表
-    Elf64_Rela *rela = NULL;       // 重定位表
-    size_t rela_size = 0;          // 重定位表大小
-    
-    // 从动态段获取必要的表
-    for (Elf64_Dyn *d = obj->dynamic; d->d_tag != DT_NULL; d++) 
-    {
-        switch (d->d_tag) 
-        {
-            case DT_STRTAB:
-                // 加上基址偏移量获取实际地址
-                strtab = (const char*)((char*)obj->base + d->d_un.d_ptr);
-                LOG_DEBUG("strtab: 0x%x\n", strtab);
-                break;
-            case DT_SYMTAB:
-                // 加上基址偏移量获取实际地址
-                symtab = (Elf64_Sym*)((char*)obj->base + d->d_un.d_ptr);
-                LOG_DEBUG("symtab: 0x%x\n", symtab);
-                break;
-            case DT_RELA:
-                // 加上基址偏移量获取实际地址
-                rela = (Elf64_Rela*)((char*)obj->base + d->d_un.d_ptr);
-                LOG_DEBUG("rela: 0x%x\n", rela);
-                break;
-            case DT_RELASZ:
-                rela_size = d->d_un.d_val;
-                LOG_DEBUG("rela_size: 0x%x\n", rela_size);
-                break;
-        }
-    }
-    
-    // 验证所有必需的表都存在
-    if (!strtab || !symtab || !rela || !rela_size)
-    {
-        return 0;  // 没有需要处理的重定位
-    }
-    
-    // 处理每个重定位项
-    size_t rela_count = rela_size / sizeof(Elf64_Rela);
-    printf("rela_count: 0x%x\n", rela_count);
-    for (size_t i = 0; i < rela_count; i++) 
-    {
-        Elf64_Rela *r = &rela[i];
-        uint32_t sym_idx = r->r_info >> 32;           // 符号表索引
-        uint32_t type = r->r_info & 0xffffffff;       // 重定位类型
-        
-        // 获取符号信息
-        Elf64_Sym *sym = &symtab[sym_idx];
-        const char *sym_name = strtab + sym->st_name;
-        LOG_DEBUG("sym_name: 0x%x\n", sym_name);
-        
-        // 计算重定位位置
-        uint64_t *target = (uint64_t*)((char*)obj->base + r->r_offset);
-        LOG_DEBUG("target: 0x%x base: 0x%x offset: 0x%x\n", target, obj->base, r->r_offset);
-        // 根据重定位类型进行处理
-        switch (type) 
-        {
-            case R_AARCH64_GLOB_DAT:
-            case R_AARCH64_JUMP_SLOT:
-            {
-                // 查找符号的实际地址
-                struct SymbolEntry *entry = find_symbol(sym_name);
-                LOG_DEBUG("entry: 0x%x\n", entry);
-                if (!entry)
-                {
-                    if (sym->st_shndx == SHN_UNDEF)
-                    {
-                        set_error("Undefined symbol");
-                        return -1;
-                    }
-                    // 使用本地符号的地址
-                    LOG_DEBUG("target: 0x%x base: 0x%x value: 0x%x\n", target, obj->base, sym->st_value);
-                    *target = (uint64_t)obj->base + sym->st_value;
-                }
-                else 
-                {
-                    // 使用全局符号表中的地址
-                    LOG_DEBUG("target: 0x%x value: 0x%x\n", target, entry->value);
-                    *target = entry->value;
-                }
-                break;
-            }
-            case R_AARCH64_RELATIVE:
-                // 基址重定位
-                LOG_DEBUG("target: 0x%x addend: 0x%x\n", target, r->r_addend);
-                *target = (uint64_t)obj->base + r->r_addend;
-                break;
-            default:
-                set_error("Unknown relocation type");
-                return -1;
+            return p[1];
         }
     }
     
@@ -700,635 +395,170 @@ static int process_relocations(struct LoadedObject *obj)
 }
 
 /**
- * 添加搜索路径
+ * 解析辅助向量 (auxv)
  * 
- * @param path: 要添加的搜索路径
- * @return: 成功返回0，失败返回-1
+ * @param auxv: 辅助向量数组指针
  */
-static int add_search_path(const char *path)
+static void parse_auxv(uint64_t *auxv)
 {
-    if (g_search_paths.count >= MAX_SEARCH_PATHS) 
+    if (!auxv) 
     {
-        LOG_ERROR("Too many search paths\n");
-        return -1;
+        printf_simple("auxv is NULL\n");
+        return;
     }
-
-    char *path_copy = malloc(strlen(path) + 1);
-    if (!path_copy) 
+    
+    printf_simple("=== Parsing Auxiliary Vector ===\n");
+    
+    // 解析并保存重要的 auxv 值
+    g_auxv_entry = get_auxv(auxv, AT_ENTRY);
+    g_auxv_phdr = get_auxv(auxv, AT_PHDR);
+    g_auxv_phent = get_auxv(auxv, AT_PHENT);
+    g_auxv_phnum = get_auxv(auxv, AT_PHNUM);
+    g_auxv_pagesz = get_auxv(auxv, AT_PAGESZ);
+    g_auxv_base = get_auxv(auxv, AT_BASE);
+    
+    uint64_t platform_ptr = get_auxv(auxv, AT_PLATFORM);
+    if (platform_ptr) 
     {
-        LOG_ERROR("Failed to allocate path\n");
-        return -1;
+        g_auxv_platform = (const char *)platform_ptr;
     }
-
-    memcpy(path_copy, path, strlen(path) + 1);
-    g_search_paths.paths[g_search_paths.count++] = path_copy;
-    LOG_DEBUG("Added search path: %s\n", path_copy);
-    return 0;
+    
+    uint64_t execfn_ptr = get_auxv(auxv, AT_EXECFN);
+    if (execfn_ptr) 
+    {
+        g_auxv_execfn = (const char *)execfn_ptr;
+    }
+    
+    // 使用 printf_simple 打印所有重要的 auxv 值
+    if (g_auxv_entry) 
+    {
+        printf_simple("AT_ENTRY: 0x%x\n", (unsigned int)g_auxv_entry);
+    }
+    if (g_auxv_phdr) 
+    {
+        printf_simple("AT_PHDR: 0x%x\n", (unsigned int)g_auxv_phdr);
+    }
+    if (g_auxv_phent) 
+    {
+        printf_simple("AT_PHENT: %d\n", (int)g_auxv_phent);
+    }
+    if (g_auxv_phnum) 
+    {
+        printf_simple("AT_PHNUM: %d\n", (int)g_auxv_phnum);
+    }
+    if (g_auxv_pagesz) 
+    {
+        printf_simple("AT_PAGESZ: %d\n", (int)g_auxv_pagesz);
+    }
+    if (g_auxv_base) 
+    {
+        printf_simple("AT_BASE: 0x%x\n", (unsigned int)g_auxv_base);
+    }
+    if (g_auxv_platform) 
+    {
+        printf_simple("AT_PLATFORM: %s\n", g_auxv_platform);
+    }
+    if (g_auxv_execfn) 
+    {
+        printf_simple("AT_EXECFN: %s\n", g_auxv_execfn);
+    }
+    
+    printf_simple("==============================\n");
 }
 
 /**
- * 初始化搜索路径
- * 添加默认搜索路径和环境变量指定的路径
- * 
- * @return: 成功返回0，失败返回-1
+ * 从栈指针解析参数
+ * 栈布局：
+ * [sp]: argc (8字节)
+ * [sp+8]: argv[0]
+ * [sp+16]: argv[1]
+ * ...
+ * [sp+8*argc]: NULL (argv 结束)
+ * [sp+8*(argc+1)]: envp[0]
+ * ...
+ * [sp+8*(argc+1+envp_count)]: NULL (envp 结束)
+ * [sp+8*(argc+2+envp_count)]: auxv[0].tag
+ * [sp+8*(argc+2+envp_count)+8]: auxv[0].value
+ * ...
+ * auxv 以 AT_NULL (tag=0, value=0) 结束
  */
-static int init_search_paths(void)
+static void parse_stack(void *stack_ptr, int *argc, char ***argv, char ***envp, uint64_t **auxv)
 {
-    // 添加默认搜索路径
-    const char *default_paths[] = {
-        ".",                    // 当前目录
-        "./lib",               // 相对路径
-        "/lib",                // 系统库目录
-        "/usr/lib",
-        "/usr/local/lib",
-        "out/lib",             // 项目输出目录
-        NULL
-    };
-
-    for (const char **p = default_paths; *p; p++) 
+    uint64_t *sp = (uint64_t *)stack_ptr;
+    
+    // 读取 argc
+    *argc = (int)sp[0];
+    
+    // 计算 argv 地址（跳过 argc）
+    *argv = (char **)(sp + 1);
+    
+    // 计算 envp 地址（跳过 argv 数组，argc+1 个元素包括 NULL）
+    *envp = (char **)(sp + 1 + (*argc) + 1);
+    
+    // 找到 envp 的结束位置（NULL）
+    char **env = *envp;
+    while (*env != NULL)
     {
-        if (add_search_path(*p) < 0) 
-        {
-            return -1;
-        }
+        env++;
     }
-
-    // 处理LD_LIBRARY_PATH环境变量
-    char *ld_path = get_env("LD_LIBRARY_PATH");
-    if (ld_path) 
-    {
-        char *path = malloc(strlen(ld_path) + 1);
-        if (!path) 
-        {
-            return -1;
-        }
-        memcpy(path, ld_path, strlen(ld_path) + 1);
-
-        // 分割路径字符串
-        char *saveptr;
-        char *p = strtok_r(path, ":", &saveptr);
-        while (p) 
-        {
-            if (add_search_path(p) < 0) 
-            {
-                free(path);
-                return -1;
-            }
-            p = strtok_r(NULL, ":", &saveptr);
-        }
-        free(path);
-    }
-
-    return 0;
+    
+    // auxv 在 envp 结束后的下一个位置
+    *auxv = (uint64_t *)(env + 1);
 }
 
-/**
- * 在搜索路径中查找库文件
- * 
- * @param name: 库文件名
- * @param full_path: 输出缓冲区，用于存储找到的完整路径
- * @param size: 缓冲区大小
- * @return: 成功返回0，失败返回-1
- */
-static int find_library(const char *name, char *full_path, size_t size)
+__attribute__((visibility("hidden")))
+int main(void *stack_pointer)
 {
-    LOG_DEBUG("Finding library: %s\n", name);
+    int argc;
+    char **argv;
+    char **envp;
+    uint64_t *auxv;
     
-    // 如果是绝对路径，直接检查文件是否存在
-    if (name[0] == '/') 
-    {
-        if (file_exists(name) == 0) 
-        {
-            safe_strncpy(full_path, name, size);
-            return 0;
-        }
-        return -1;
-    }
-
-    // 在所有搜索路径中查找
-    for (int i = 0; i < g_search_paths.count; i++) 
-    {
-        safe_snprintf(full_path, size, "%s/%s", g_search_paths.paths[i], name);
-        LOG_DEBUG("Trying path: %s\n", full_path);
-        
-        if (file_exists(full_path) == 0) 
-        {
-            LOG_DEBUG("Found library at: %s\n", full_path);
-            return 0;
-        }
-    }
-
-    LOG_ERROR("Library not found: %s\n", name);
-    return -1;
-}
-
-/**
- * 清理搜索路径
- */
-static void cleanup_search_paths(void)
-{
-    for (int i = 0; i < g_search_paths.count; i++) 
-    {
-        free(g_search_paths.paths[i]);
-    }
-    g_search_paths.count = 0;
-}
-
-/**
- * 处理命令行参数中的库路径
- * 
- * @param argc: 参数个数
- * @param argv: 参数数组
- * @return: 成功返回0，失败返回-1
- */
-static int process_args(int argc, char **argv)
-{
-    for (int i = 1; i < argc; i++) 
-    {
-        if (strcmp(argv[i], "-L") == 0 && i + 1 < argc) 
-        {
-            if (add_search_path(argv[++i]) < 0) 
-            {
-                return -1;
-            }
-        }
-    }
-    return 0;
-}
-
-/**
- * 加载ELF对象（可执行文件或共享库）
- * 
- * 实现原理：
- * 1. 打开并读取ELF文件头
- * 2. 验证ELF文件的有效性和兼容性
- * 3. 计算内存布局
- * 4. 分配并映射内存空间
- * 5. 加载程序段到内存
- * 6. 设置内存权限
- * 
- * @param name: 文件名
- * @param is_exec: 是否是可执行文件
- * @return: 成功返回LoadedObject结构指针，失败返回NULL
- */
-static struct LoadedObject* load_object(const char *name, int is_exec)
-{
-    int fd = -1;
-    void *mapped_base = NULL;
-    struct LoadedObject *obj = NULL;
-    size_t total_size = 0;
-    int result = -1;
-    char full_path[MAX_PATH_LEN];
-
-    // 检查是否已加载
-    for (struct LoadedObject *l = g_ctx.loaded_objects; l; l = l->next) 
-    {
-        if (strcmp(l->path, name) == 0) 
-        {
-            return l;  // 已加载，直接返回
-        }
-    }
-
-    // 如果不是可执行文件，需要在搜索路径中查找
-    if (!is_exec) 
-    {
-        if (find_library(name, full_path, sizeof(full_path)) < 0) 
-        {
-            LOG_ERROR("Failed to find library: %s\n", name);
-            goto cleanup;
-        }
-        name = full_path;
-    }
-
-    LOG_DEBUG("Loading object: %s\n", name);
+    // 从栈指针解析所有参数
+    parse_stack(stack_pointer, &argc, &argv, &envp, &auxv);
     
-    // 分配对象结构
-    obj = (struct LoadedObject *)malloc(64);
-    if (!obj) 
-    {
-        LOG_ERROR("Failed to allocate object info\n");
-        goto cleanup;
-    }
-    memset((char *)obj, 0, sizeof(struct LoadedObject));
-    // 复制文件路径
-    obj->path = malloc(strlen(name) + 1);
-    if (!obj->path) 
-    {
-        LOG_ERROR("Failed to allocate path\n");
-        goto cleanup;
-    }
-    memcpy(obj->path, name, strlen(name) + 1);
-    // 打开文件
-    fd = open(name, O_RDONLY, 0);
-    if (fd < 0) 
-    {
-        LOG_ERROR("Failed to open file\n");
-        goto cleanup;
-    }
-    // 读取并验证ELF头
-    Elf64_Ehdr ehdr;
-    if (read(fd, &ehdr, sizeof(ehdr)) != sizeof(ehdr)) 
-    {
-        LOG_ERROR("Failed to read ELF header\n");
-        goto cleanup;
-    }
-
-    // 验证ELF魔数
-    if (ehdr.e_ident[0] != 0x7f || ehdr.e_ident[1] != 'E' ||
-        ehdr.e_ident[2] != 'L' || ehdr.e_ident[3] != 'F') 
-    {
-        LOG_ERROR("Invalid ELF file");
-        goto cleanup;
-    }
-    
-    // 验证文件类型
-    if (is_exec && ehdr.e_type != ET_EXEC) 
-    {
-        LOG_ERROR("Not an executable file");
-        goto cleanup;
-    } 
-    else if (!is_exec && ehdr.e_type != ET_DYN) 
-    {
-        LOG_ERROR("Not a shared object");
-        goto cleanup;
-    }
-    
-    // 验证机器类型
-    if (ehdr.e_machine != EM_AARCH64) 
-    {
-        LOG_ERROR("Invalid machine type");
-        goto cleanup;
-    }
-    
-    // 计算内存布局
-    uint64_t min_vaddr = UINT_MAX;
-    uint64_t max_vaddr = 0;
-    LOG_DEBUG("ehdr.e_phnum: %d\n", ehdr.e_phnum);
-    // 遍历程序头表计算地址范围
-    for (int i = 0; i < ehdr.e_phnum; i++) 
-    {
-        Elf64_Phdr phdr;
-        if (lseek(fd, ehdr.e_phoff + i * sizeof(phdr), SEEK_SET) < 0 ||
-            read(fd, &phdr, sizeof(phdr)) != sizeof(phdr)) 
-        {
-            LOG_ERROR("Failed to read program header");
-            goto cleanup;
-        }
-        
-        if (phdr.p_type == PT_LOAD) 
-        {
-            // 更新地址范围
-            LOG_DEBUG("Processing segment %d: vaddr=0x%x, memsz=0x%x, min_vaddr=0x%x, max_vaddr=0x%x\n", 
-                   i, phdr.p_vaddr, phdr.p_memsz, min_vaddr, max_vaddr);
-            if (phdr.p_vaddr < min_vaddr)
-            {
-                min_vaddr = phdr.p_vaddr;
-            }
-
-            if (phdr.p_vaddr + phdr.p_memsz > max_vaddr)
-            {
-                max_vaddr = phdr.p_vaddr + phdr.p_memsz;
-            }
-        }
-        else if (phdr.p_type == PT_INTERP && !g_ctx.interp) 
-        {
-            // 读取解释器路径
-            char interp[256];
-            if (lseek(fd, phdr.p_offset, SEEK_SET) < 0 ||
-                read(fd, interp, phdr.p_filesz) != phdr.p_filesz) 
-            {
-                LOG_ERROR("Failed to read interpreter path");
-                goto cleanup;
-            }
-            interp[phdr.p_filesz] = '\0';
-            
-            // 保存解释器路径
-            g_ctx.interp = (char *)malloc(strlen(interp) + 1);
-            if (!g_ctx.interp) 
-            {
-                LOG_ERROR("Failed to allocate interpreter path");
-                goto cleanup;
-            }
-            LOG_DEBUG("interp: 0x%x\n", g_ctx.interp);
-            memcpy((char *)g_ctx.interp, interp, strlen(interp) + 1);
-        }
-    }
-    
-    // 计算总大小并对齐到页大小
-    total_size = max_vaddr - min_vaddr;
-    total_size = (total_size + 0xfff) & ~0xfff;  // 4KB对齐
-
-    LOG_DEBUG("total size: %d\n", total_size); 
-    
-    // 分配内存空间
-    if (is_exec) 
-    {
-        // 可执行文件使用固定地址
-        mapped_base = (void*)min_vaddr;
-        LOG_DEBUG("before mmap mmaped_base: 0x%x\n", mapped_base);
-        //mapped_base = mmap(mapped_base, total_size,
-        //                  PROT_READ | PROT_WRITE,
-        //                  MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS,
-        //                  -1, 0);
-        mapped_base = mmap(NULL, total_size,
-                          PROT_READ | PROT_WRITE,
-                          MAP_PRIVATE | MAP_ANONYMOUS,
-                          -1, 0);                          
-    } 
-    else 
-    {
-        // 共享库使用动态地址
-        mapped_base = mmap(NULL, total_size,
-                          PROT_READ | PROT_WRITE,
-                          MAP_PRIVATE | MAP_ANONYMOUS,
-                          -1, 0);
-    }
-
-    if (mapped_base == NULL) 
-    {
-        LOG_ERROR("Failed to allocate memory");
-    }
-
-    LOG_DEBUG("mapped base: 0x%x\n", mapped_base);
-    
-    if (mapped_base == MAP_FAILED) 
-    {
-        LOG_ERROR("Failed to allocate memory\n");
-        goto cleanup;
-    }
-    
-    // 加载程序段
-    for (int i = 0; i < ehdr.e_phnum; i++) 
-    {
-        Elf64_Phdr phdr;
-        if (lseek(fd, ehdr.e_phoff + i * sizeof(phdr), SEEK_SET) < 0 ||
-            read(fd, &phdr, sizeof(phdr)) != sizeof(phdr)) 
-        {
-            LOG_ERROR("Failed to read program header\n");
-            goto cleanup;
-        }
-        
-        if (phdr.p_type == PT_LOAD) 
-        {
-            // 计算段的加载地址
-            void *seg_addr = (char*)mapped_base + (phdr.p_vaddr - min_vaddr);
-            
-            // 确保段地址页对齐
-            uint64_t aligned_addr = (uint64_t)seg_addr & ~0xfff;  // 4KB对齐
-            size_t aligned_size = ((phdr.p_memsz + 0xfff) & ~0xfff);  // 向上取整到4KB
-            
-            // 读取段内容
-            if (lseek(fd, phdr.p_offset, SEEK_SET) < 0 ||
-                read(fd, seg_addr, phdr.p_filesz) != phdr.p_filesz) 
-            {
-                LOG_ERROR("Failed to read segment\n");
-                goto cleanup;
-            }
-            
-            // 清零未初始化数据
-            if (phdr.p_filesz < phdr.p_memsz) 
-            {
-                memset((char*)seg_addr + phdr.p_filesz, 0,
-                       phdr.p_memsz - phdr.p_filesz);
-            }
-            
-            // 设置段的访问权限
-            int prot = 0;
-            if (phdr.p_flags & PF_R) prot |= PROT_READ;
-            if (phdr.p_flags & PF_W) prot |= PROT_WRITE;
-            if (phdr.p_flags & PF_X) prot |= PROT_EXEC;
-            
-            LOG_DEBUG("seg_addr: 0x%x\n", seg_addr);
-            LOG_DEBUG("aligned_addr: 0x%x\n", aligned_addr);
-            LOG_DEBUG("aligned_size: 0x%x\n", aligned_size);
-            LOG_DEBUG("prot: 0x%x\n", prot);
-            
-            if (mprotect((void*)aligned_addr, aligned_size, prot) < 0) 
-            {
-                LOG_ERROR("Failed to set segment protection\n");
-                goto cleanup;
-            }
-        }
-        else if (phdr.p_type == PT_DYNAMIC) 
-        {
-            // 保存动态段地址
-            obj->dynamic = (Elf64_Dyn*)((char*)mapped_base +
-                                      (phdr.p_vaddr - min_vaddr));
-        }
-    }
-    
-    // 设置对象信息
-    obj->base = mapped_base;
-    obj->base_offset = (uint64_t)mapped_base - (is_exec ? min_vaddr : 0);  // 计算基址偏移
-    obj->size = total_size;
-    obj->entry = (void*)((char*)mapped_base + (ehdr.e_entry - min_vaddr));
-    
-    LOG_DEBUG("base: 0x%x, base_offset: 0x%x\n", obj->base, obj->base_offset);
-    
-    // 添加到已加载对象列表
-    obj->next = g_ctx.loaded_objects;
-    g_ctx.loaded_objects = obj;
-    
-    result = 0;
-
-cleanup:
-    // 清理资源
-    if (fd >= 0) 
-    {
-        close(fd);
-    }
-    
-    if (result < 0) 
-    {
-        if (mapped_base) 
-        {
-            munmap(mapped_base, total_size);
-        }
-        if (obj) 
-        {
-            if (obj->path) 
-            {
-                free(obj->path);
-            }
-            free(obj);
-            obj = NULL;
-        }
-    }
-    
-    return obj;
-}
-
-/**
- * 加载依赖库
- * 递归加载对象的所有依赖库
- * 
- * 实现原理：
- * 1. 从动态段获取DT_NEEDED项
- * 2. 对每个依赖库：
- *    - 加载库文件
- *    - 递归加载其依赖
- * 
- * @param obj: 要处理依赖的对象
- * @return: 成功返回0，失败返回-1
- */
-static int load_dependencies(struct LoadedObject *obj)
-{
-    if (!obj->dynamic) 
-    {
-        return 0;  // 没有动态段，不需要加载依赖
-    }
-    
-    // 获取字符串表
-    const char *strtab = NULL;
-    for (Elf64_Dyn *d = obj->dynamic; d->d_tag != DT_NULL; d++) 
-    {
-        LOG_DEBUG("d->d_tag: %d\n", d->d_tag);
-        if (d->d_tag == DT_STRTAB) 
-        {
-            // 使用保存的基址偏移量计算实际地址
-            strtab = (const char*)d->d_un.d_ptr + obj->base_offset;
-            LOG_DEBUG("d_ptr: 0x%x, base_offset: 0x%x, actual strtab: 0x%x\n", 
-                     d->d_un.d_ptr, obj->base_offset, strtab);
-            break;
-        }
-    }
-    
-    if (!strtab) 
-    {
-        return 0;
-    }
-
-    LOG_DEBUG("strtab: 0x%x\n", strtab);
-    
-    // 处理每个DT_NEEDED项
-    for (Elf64_Dyn *d = obj->dynamic; d->d_tag != DT_NULL; d++) 
-    {
-        if (d->d_tag == DT_NEEDED) 
-        {
-            // 获取依赖库名称
-            const char *name = strtab + d->d_un.d_val;
-            LOG_DEBUG("load_dependencies: %s\n", name);
-            
-            // 加载依赖库
-            struct LoadedObject *dep = load_object(name, 0);
-            if (!dep) 
-            {
-                return -1;
-            }
-            
-            // 递归加载依赖库的依赖
-            if (load_dependencies(dep) < 0) 
-            {
-                return -1;
-            }
-        }
-    }
-    
-    return 0;
-}
-
-/**
- * 动态链接器主函数
- * 
- * 实现流程：
- * 1. 加载主可执行文件
- * 2. 如果存在解释器，加载解释器
- * 3. 加载所有依赖库
- * 4. 处理所有重定位
- * 5. 跳转到程序入口点
- * 
- * @param argc: 参数个数
- * @param argv: 参数数组
- * @return: 成功返回0，失败返回非0
- */
-int main(int argc, char **argv, char **envp)
-{
-    // 保存环境变量
+    // 保存环境变量指针
     g_environ = envp;
     
-    if (argc < 2) 
+    // 使用 printf_simple 进行初始化阶段的打印
+    printf_simple("=== Dynamic Linker Starting ===\n");
+    printf_simple("argc: %d\n", argc);
+    
+    // 解析辅助向量 (auxv)
+    parse_auxv(auxv);
+    
+    // 解析环境变量
+    printf_simple("\nParsing environment variables...\n");
+    print_all_env();
+    
+    // 解析重要的环境变量
+    char *ld_library_path = get_env("LD_LIBRARY_PATH");
+    if (ld_library_path) 
     {
-        LOG_ERROR("Usage: %s [-L path] <executable>\n", argv[0]);
-        return 1;
-    }
-
-    // 初始化搜索路径
-    if (init_search_paths() < 0) 
+        printf_simple("LD_LIBRARY_PATH=%s\n", ld_library_path);
+    } else 
     {
-        LOG_ERROR("Failed to initialize search paths\n");
-        return 1;
+        printf_simple("LD_LIBRARY_PATH not set\n");
     }
-
-    // 处理命令行参数
-    if (process_args(argc, argv) < 0) 
+    
+    char *ld_preload = get_env("LD_PRELOAD");
+    if (ld_preload) 
     {
-        LOG_ERROR("Failed to process arguments\n");
-        cleanup_search_paths();
-        return 1;
+        printf_simple("LD_PRELOAD=%s\n", ld_preload);
     }
-
-    // 获取可执行文件路径（跳过-L参数）
-    char *exec_path = NULL;
-    for (int i = 1; i < argc; i++) 
+    
+    char *path = get_env("PATH");
+    if (path) 
     {
-        if (strcmp(argv[i], "-L") == 0) 
-        {
-            i++;  // 跳过路径参数
-            continue;
-        }
-        exec_path = argv[i];
-        break;
+        printf_simple("PATH=%s\n", path);
     }
-
-    if (!exec_path) 
-    {
-        LOG_ERROR("No executable specified\n");
-        cleanup_search_paths();
-        return 1;
-    }
-
-    // 加载可执行文件
-    struct LoadedObject *exec = load_object(exec_path, 1);
-    if (!exec) 
-    {
-        LOG_ERROR("Failed to load executable: %s\n",
-               g_ctx.error ? g_ctx.error : "Unknown error");
-        cleanup_context();
-        cleanup_search_paths();
-        return 1;
-    }
-    LOG_DEBUG("exec: %s\n", exec->path);
-
-    // 加载所有依赖
-    if (load_dependencies(exec) < 0) 
-    {
-        LOG_ERROR("Failed to load dependencies: %s\n",
-               g_ctx.error ? g_ctx.error : "Unknown error");
-        cleanup_context();
-        cleanup_search_paths();
-        return 1;
-    }
-    LOG_DEBUG("loaded_objects: %s\n", g_ctx.loaded_objects->path);
-    // 处理所有重定位
-    for (struct LoadedObject *obj = g_ctx.loaded_objects; obj; obj = obj->next) 
-    {
-        if (process_relocations(obj) < 0) 
-        {
-            LOG_ERROR("Failed to process relocations: %s\n",
-                   g_ctx.error ? g_ctx.error : "Unknown error");
-            cleanup_context();
-            cleanup_search_paths();
-            return 1;
-        }
-    }
-    LOG_DEBUG("process_relocations: %s\n", g_ctx.loaded_objects->path);
-    // 调用程序入口点
-    void (*entry)(void) = exec->entry;
-    entry();
-    LOG_DEBUG("entry: 0x%x\n", exec->entry);
-    // 清理资源
-    cleanup_context();
-    cleanup_search_paths();
+    
+    printf_simple("\nDynamic Linker initialization complete.\n");
+    
+    // TODO: 解析参数
+    // TODO: 加载动态库
+    // TODO: 初始化动态库
+    // TODO: 执行动态库（使用 g_auxv_entry）
+    
     return 0;
 }
-
