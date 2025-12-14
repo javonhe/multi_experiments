@@ -56,7 +56,7 @@ add_library(dynamic_linker_shared SHARED src/dynamic_linker.c src/dynamic_entry.
 set_target_properties(dynamic_linker_shared PROPERTIES
     OUTPUT_NAME "dynamic_linker"
     POSITION_INDEPENDENT_CODE ON
-    LINK_FLAGS "-nostdlib -static -Wl,-e,_start -Wl,-Bsymbolic -Wl,-z,now"
+    LINK_FLAGS "-nostdlib -Wl,-e,_start -Wl,-Bsymbolic -Wl,-z,now"
     COMPILE_FLAGS "-fno-plt -fPIC"
 )
 target_link_libraries(dynamic_linker_shared mini_libc)
