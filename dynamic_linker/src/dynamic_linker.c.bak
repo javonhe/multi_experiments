@@ -1,0 +1,3055 @@
+#include "mini_lib.h"
+
+// 全局变量：保存环境变量指针
+static char **g_environ = NULL;
+
+// 辅助向量 (auxv) 类型定义
+typedef struct {
+    uint64_t tag;
+    uint64_t value;
+} AuxvEntry;
+
+// 辅助向量标签定义 (AT_*)
+#define AT_NULL      0    // 结束标记
+#define AT_IGNORE    1    // 忽略
+#define AT_EXECFD    2    // 可执行文件描述符
+#define AT_PHDR      3    // 程序头表地址
+#define AT_PHENT     4    // 程序头表项大小
+#define AT_PHNUM     5    // 程序头表项数量
+#define AT_PAGESZ    6    // 页大小
+#define AT_BASE      7    // 动态链接器基址
+#define AT_FLAGS     8    // 标志
+#define AT_ENTRY     9    // 可执行文件入口点
+#define AT_NOTELF    10   // 不是 ELF 文件
+#define AT_UID       11   // 用户 ID
+#define AT_EUID      12   // 有效用户 ID
+#define AT_GID       13   // 组 ID
+#define AT_EGID      14   // 有效组 ID
+#define AT_PLATFORM  15   // 平台字符串
+#define AT_HWCAP     16   // 硬件能力
+#define AT_CLKTCK    17   // 时钟频率
+#define AT_SECURE     23   // 安全模式
+#define AT_RANDOM    25   // 随机数种子
+#define AT_EXECFN    31   // 可执行文件路径
+
+// 全局变量：保存重要的 auxv 值
+static uint64_t g_auxv_entry = 0;      // AT_ENTRY: 可执行文件入口点
+static uint64_t g_auxv_phdr = 0;       // AT_PHDR: 可执行文件的程序头表在内存中的虚拟地址（真实地址，可直接使用）
+static uint64_t g_auxv_phent = 0;      // AT_PHENT: 程序头表项大小
+static uint64_t g_auxv_phnum = 0;      // AT_PHNUM: 程序头表项数量
+static uint64_t g_auxv_pagesz = 0;     // AT_PAGESZ: 页大小
+static uint64_t g_auxv_base = 0;       // AT_BASE: 动态链接器基址
+static const char *g_auxv_platform = NULL;  // AT_PLATFORM: 平台字符串
+static const char *g_auxv_execfn = NULL;     // AT_EXECFN: 可执行文件路径
+static uintptr_t g_original_stack_pointer = 0;  // 保存原始栈指针（避免被覆盖）
+static uintptr_t g_saved_sp = 0;  // 保存用于跳转的栈指针
+static uintptr_t g_saved_entry = 0;  // 保存入口点地址
+static uint64_t g_saved_user_argc = 0;  // 保存用户栈上的 argc（在函数开始时读取）
+static uint64_t g_saved_user_argv0 = 0;  // 保存用户栈上的 argv[0]（在函数开始时读取）
+
+// ELF 文件结构定义
+#define EI_NIDENT 16
+#define PT_LOAD 1
+#define PT_DYNAMIC 2
+
+typedef struct {
+    unsigned char e_ident[EI_NIDENT];
+    uint16_t e_type;
+    uint16_t e_machine;
+    uint32_t e_version;
+    uint64_t e_entry;
+    uint64_t e_phoff;
+    uint64_t e_shoff;
+    uint32_t e_flags;
+    uint16_t e_ehsize;
+    uint16_t e_phentsize;
+    uint16_t e_phnum;
+    uint16_t e_shentsize;
+    uint16_t e_shnum;
+    uint16_t e_shstrndx;
+} Elf64_Ehdr;
+
+typedef struct {
+    uint32_t p_type;
+    uint32_t p_flags;
+    uint64_t p_offset;
+    uint64_t p_vaddr;
+    uint64_t p_paddr;
+    uint64_t p_filesz;
+    uint64_t p_memsz;
+    uint64_t p_align;
+} Elf64_Phdr;
+
+// 动态段条目
+typedef struct {
+    int64_t d_tag;
+    uint64_t d_val;
+} Elf64_Dyn;
+
+// 动态段标签 (DT_*)
+#define DT_NULL     0
+#define DT_NEEDED   1
+#define DT_PLTRELSZ 2
+#define DT_PLTGOT   3
+#define DT_HASH     4
+#define DT_STRTAB   5
+#define DT_SYMTAB   6
+#define DT_RELA     7
+#define DT_RELASZ   8
+#define DT_RELAENT  9
+#define DT_STRSZ    10
+#define DT_SYMENT   11
+#define DT_INIT     12
+#define DT_FINI     13
+#define DT_SONAME   14
+#define DT_RPATH    15
+#define DT_SYMBOLIC 16
+#define DT_REL      17
+#define DT_RELSZ    18
+#define DT_RELENT   19
+#define DT_PLTREL   20
+#define DT_DEBUG    21
+#define DT_TEXTREL  22
+#define DT_JMPREL   23
+#define DT_BIND_NOW 24
+#define DT_INIT_ARRAY    25
+#define DT_FINI_ARRAY    26
+#define DT_INIT_ARRAYSZ  27
+#define DT_FINI_ARRAYSZ  28
+#define DT_RUNPATH       29
+#define DT_FLAGS         30
+#define DT_PREINIT_ARRAY 32
+#define DT_PREINIT_ARRAYSZ 33
+
+// 重定位条目 (AArch64)
+typedef struct {
+    uint64_t r_offset;
+    uint32_t r_info;
+    int64_t  r_addend;  // 使用int64_t代替int32_t
+} Elf64_Rela;
+
+// AArch64使用32位r_info，高24位是符号索引，低8位是类型
+#define ELF64_R_SYM(i)    (((uint64_t)(i)) >> 8)
+#define ELF64_R_TYPE(i)   ((i) & 0xff)
+#define ELF64_R_INFO(s,t) (((s) << 8) + ((t) & 0xff))
+
+// AArch64 重定位类型
+#define R_AARCH64_NONE     0
+#define R_AARCH64_ABS64    257
+#define R_AARCH64_GLOB_DAT 1025
+#define R_AARCH64_JUMP_SLOT 1026
+#define R_AARCH64_RELATIVE 1027
+
+// 符号表条目
+typedef struct {
+    uint32_t st_name;
+    unsigned char st_info;
+    unsigned char st_other;
+    uint16_t st_shndx;
+    uint64_t st_value;
+    uint64_t st_size;
+} Elf64_Sym;
+
+#define ELF64_ST_BIND(i)  ((i) >> 4)
+#define ELF64_ST_TYPE(i)  ((i) & 0xf)
+#define ELF64_ST_INFO(b,t) (((b) << 4) + ((t) & 0xf))
+
+#define STB_LOCAL  0
+#define STB_GLOBAL 1
+#define STB_WEAK   2
+
+#define STT_NOTYPE  0
+#define STT_OBJECT  1
+#define STT_FUNC    2
+#define STT_SECTION 3
+#define STT_FILE    4
+
+// 自举状态标志
+static int g_bootstrap_done = 0;
+
+// 已加载库的信息结构
+typedef struct loaded_library {
+    char *path;                    // 库文件路径
+    uint64_t base_addr;            // 加载基址
+    Elf64_Ehdr *ehdr;              // ELF头
+    Elf64_Phdr *phdr;              // 程序头表
+    Elf64_Dyn *dynamic;            // 动态段
+    const char *strtab;            // 字符串表
+    Elf64_Sym *symtab;             // 符号表
+    uint32_t symnum;               // 符号数量
+    uint64_t init;                 // DT_INIT 地址
+    uint64_t init_array;           // DT_INIT_ARRAY 地址
+    uint64_t init_array_size;      // DT_INIT_ARRAYSZ
+    struct loaded_library *next;   // 链表指针
+} LoadedLibrary;
+
+// 全局符号表条目
+typedef struct symbol_entry {
+    const char *name;               // 符号名称
+    void *address;                  // 符号地址
+    LoadedLibrary *library;         // 所属库
+    struct symbol_entry *next;      // 哈希表链表
+} SymbolEntry;
+
+// 全局变量：已加载的库和符号表
+static LoadedLibrary *g_loaded_libraries = NULL;  // 已加载库链表
+static SymbolEntry *g_symbol_table[256] = {0};   // 简单哈希表（256个桶）
+static int g_library_count = 0;                   // 已加载库数量
+
+
+/**
+ * 简单的字符串长度函数（不使用 PLT）
+ */
+static size_t strlen_simple(const char *s)
+{
+    size_t len = 0;
+    while (s[len] != '\0')
+    {
+        len++;
+    }
+    return len;
+}
+
+/**
+ * 将整数转换为十进制字符串（不使用 PLT）
+ */
+static void itoa_simple(int64_t value, char *buf, int base)
+{
+    char *p = buf;
+    int negative = 0;
+    
+    if (value < 0 && base == 10)
+    {
+        negative = 1;
+        value = -value;
+    }
+    
+    if (value == 0)
+    {
+        *p++ = '0';
+        *p = '\0';
+        return;
+    }
+    
+    // 从低位到高位转换
+    char temp[32];
+    int i = 0;
+    while (value > 0)
+    {
+        int digit = value % base;
+        temp[i++] = (digit < 10) ? ('0' + digit) : ('a' + digit - 10);
+        value /= base;
+    }
+    
+    if (negative)
+    {
+        *p++ = '-';
+    }
+    
+    // 反转字符串
+    while (i > 0)
+    {
+        *p++ = temp[--i];
+    }
+    *p = '\0';
+}
+
+/**
+ * 将无符号整数转换为十六进制字符串（不使用 PLT）
+ */
+static void utoa_hex_simple(uint64_t value, char *buf)
+{
+    char *p = buf;
+    
+    if (value == 0)
+    {
+        *p++ = '0';
+        *p = '\0';
+        return;
+    }
+    
+    // 从低位到高位转换
+    char temp[32];
+    int i = 0;
+    while (value > 0)
+    {
+        int digit = value % 16;
+        temp[i++] = (digit < 10) ? ('0' + digit) : ('a' + digit - 10);
+        value /= 16;
+    }
+    
+    // 反转字符串
+    while (i > 0)
+    {
+        *p++ = temp[--i];
+    }
+    *p = '\0';
+}
+
+/**
+ * 简单的 write 系统调用（不使用 PLT）
+ * AArch64: __NR_write = 64 (0x40)
+ */
+static int write_simple(int fd, const void *buf, size_t count)
+{
+    long result;
+    asm volatile(
+        "mov x8, #0x40\n"           // __NR_write = 64
+        "mov x0, %1\n"              // fd
+        "mov x1, %2\n"              // buf
+        "mov x2, %3\n"              // count
+        "svc #0\n"                  // 系统调用
+        "mov %0, x0\n"              // 返回值
+        : "=r"(result)
+        : "r"(fd), "r"(buf), "r"(count)
+        : "x0", "x1", "x2", "x8"
+    );
+    return (int)result;
+}
+
+
+/**
+ * 简单的 printf 实现（不使用 PLT/GOT）
+ * 支持格式：%s, %d, %x, %p, %c, %%
+ * 
+ * 注意：这是一个简化实现，使用内联汇编获取可变参数
+ */
+static int printf_simple(const char *format, ...)
+{
+    char buffer[1024];
+    char num_buf[32];
+    int buf_pos = 0;
+    
+    // 使用内联汇编获取可变参数
+    // 在 AArch64 上，可变参数通过寄存器 x1-x7 和栈传递
+    // 我们使用 __builtin_va_list 来获取参数
+    __builtin_va_list args;
+    __builtin_va_start(args, format);
+    
+    const char *p = format;
+    
+    while (*p != '\0' && buf_pos < sizeof(buffer) - 1)
+    {
+        if (*p == '%')
+        {
+            p++;
+            switch (*p)
+            {
+                case 's':  // 字符串
+                {
+                    const char *str = __builtin_va_arg(args, const char *);
+                    if (str)
+                    {
+                        size_t len = strlen_simple(str);
+                        if (buf_pos + len < sizeof(buffer) - 1)
+                        {
+                            for (size_t i = 0; i < len; i++)
+                            {
+                                buffer[buf_pos++] = str[i];
+                            }
+                        }
+                    }
+                    break;
+                }
+                case 'd':  // 十进制整数
+                {
+                    int val = __builtin_va_arg(args, int);
+                    itoa_simple(val, num_buf, 10);
+                    size_t len = strlen_simple(num_buf);
+                    if (buf_pos + len < sizeof(buffer) - 1)
+                    {
+                        for (size_t i = 0; i < len; i++)
+                        {
+                            buffer[buf_pos++] = num_buf[i];
+                        }
+                    }
+                    break;
+                }
+                case 'x':  // 十六进制整数（小写）
+                {
+                    unsigned int val = __builtin_va_arg(args, unsigned int);
+                    utoa_hex_simple(val, num_buf);
+                    size_t len = strlen_simple(num_buf);
+                    if (buf_pos + len < sizeof(buffer) - 1)
+                    {
+                        for (size_t i = 0; i < len; i++)
+                        {
+                            buffer[buf_pos++] = num_buf[i];
+                        }
+                    }
+                    break;
+                }
+                case 'p':  // 指针（作为十六进制处理）
+                {
+                    void *val = __builtin_va_arg(args, void *);
+                    buffer[buf_pos++] = '0';
+                    buffer[buf_pos++] = 'x';
+                    utoa_hex_simple((uint64_t)val, num_buf);
+                    size_t len = strlen_simple(num_buf);
+                    if (buf_pos + len < sizeof(buffer) - 1)
+                    {
+                        for (size_t i = 0; i < len; i++)
+                        {
+                            buffer[buf_pos++] = num_buf[i];
+                        }
+                    }
+                    break;
+                }
+                case 'c':  // 字符
+                {
+                    char c = (char)__builtin_va_arg(args, int);  // char 提升为 int
+                    if (buf_pos < sizeof(buffer) - 1)
+                    {
+                        buffer[buf_pos++] = c;
+                    }
+                    break;
+                }
+                case '%':  // 百分号
+                {
+                    if (buf_pos < sizeof(buffer) - 1)
+                    {
+                        buffer[buf_pos++] = '%';
+                    }
+                    break;
+                }
+                case '\n':  // 换行符（方便使用）
+                {
+                    if (buf_pos < sizeof(buffer) - 1)
+                    {
+                        buffer[buf_pos++] = '\n';
+                    }
+                    break;
+                }
+                default:
+                    // 未知格式，原样输出
+                    if (buf_pos < sizeof(buffer) - 1)
+                    {
+                        buffer[buf_pos++] = '%';
+                        if (*p != '\0')
+                        {
+                            buffer[buf_pos++] = *p;
+                        }
+                    }
+                    break;
+            }
+            if (*p != '\0')
+            {
+                p++;
+            }
+        }
+        else
+        {
+            buffer[buf_pos++] = *p++;
+        }
+    }
+    
+    buffer[buf_pos] = '\0';
+    
+    __builtin_va_end(args);
+    
+    // 写入 stdout (fd = 1)
+    if (buf_pos > 0)
+    {
+        return write_simple(1, buffer, buf_pos);
+    }
+    
+    return 0;
+}
+
+/**
+ * 简单的字符串比较函数（带长度限制，不使用 PLT）
+ */
+static int strncmp_simple(const char *s1, const char *s2, size_t n)
+{
+    while (n-- && *s1 && (*s1 == *s2))
+    {
+        s1++;
+        s2++;
+    }
+    
+    if (n == (size_t)-1)
+    {
+        return 0;
+    }
+    
+    return *(const unsigned char*)s1 - *(const unsigned char*)s2;
+}
+
+/**
+ * 获取环境变量值（不使用 PLT）
+ * 
+ * @param name: 环境变量名
+ * @return: 环境变量值，不存在返回NULL
+ */
+static char* get_env(const char *name)
+{
+    if (!g_environ || !name) 
+    {
+        return NULL;
+    }
+    
+    size_t name_len = strlen_simple(name);
+    
+    // 遍历环境变量数组
+    for (char **env = g_environ; *env != NULL; env++) 
+    {
+        // 检查变量名是否匹配（比较前 name_len 个字符）
+        if (strncmp_simple(*env, name, name_len) == 0 && (*env)[name_len] == '=') 
+        {
+            // 返回 '=' 后面的值
+            return (*env) + name_len + 1;
+        }
+    }
+    
+    return NULL;
+}
+
+/**
+ * 打印所有环境变量（用于调试）
+ */
+static void print_all_env(void)
+{
+    if (!g_environ) 
+    {
+        return;
+    }
+    
+    printf_simple("=== Environment Variables ===\n");
+    for (char **env = g_environ; *env != NULL; env++) 
+    {
+        printf_simple("%s\n", *env);
+    }
+    printf_simple("============================\n");
+}
+
+/**
+ * 获取辅助向量值
+ * 
+ * @param auxv: 辅助向量数组
+ * @param tag: 要查找的标签
+ * @return: 对应的值，不存在返回0
+ */
+static uint64_t get_auxv(uint64_t *auxv, uint64_t tag)
+{
+    if (!auxv) 
+    {
+        return 0;
+    }
+    
+    // 遍历辅助向量数组
+    for (uint64_t *p = auxv; p[0] != AT_NULL; p += 2) 
+    {
+        if (p[0] == tag) 
+        {
+            return p[1];
+        }
+    }
+    
+    return 0;
+}
+
+/**
+ * 解析辅助向量 (auxv)
+ * 
+ * @param auxv: 辅助向量数组指针
+ */
+static void parse_auxv(uint64_t *auxv)
+{
+    if (!auxv) 
+    {
+        printf_simple("auxv is NULL\n");
+        return;
+    }
+    
+    printf_simple("=== Parsing Auxiliary Vector ===\n");
+    
+    // 解析并保存重要的 auxv 值
+    g_auxv_entry = get_auxv(auxv, AT_ENTRY); // 可执行文件入口点
+    g_auxv_phdr = get_auxv(auxv, AT_PHDR); // 程序头表地址
+    g_auxv_phent = get_auxv(auxv, AT_PHENT); // 程序头表项大小
+    g_auxv_phnum = get_auxv(auxv, AT_PHNUM); // 程序头表项数量
+    g_auxv_pagesz = get_auxv(auxv, AT_PAGESZ); // 页大小
+    g_auxv_base = get_auxv(auxv, AT_BASE); // 动态链接器基址
+    
+    uint64_t platform_ptr = get_auxv(auxv, AT_PLATFORM); // 平台字符串指针 
+    if (platform_ptr) 
+    {
+        g_auxv_platform = (const char *)platform_ptr;
+    }
+    
+    uint64_t execfn_ptr = get_auxv(auxv, AT_EXECFN); // 可执行文件路径字符串指针
+    if (execfn_ptr) 
+    {
+        g_auxv_execfn = (const char *)execfn_ptr;
+    }
+    
+    // 使用 printf_simple 打印所有重要的 auxv 值
+    if (g_auxv_entry) 
+    {
+        printf_simple("AT_ENTRY: 0x%x\n", (unsigned int)g_auxv_entry);
+    }
+    if (g_auxv_phdr) 
+    {
+        printf_simple("AT_PHDR: 0x%x\n", (unsigned int)g_auxv_phdr);
+    }
+    if (g_auxv_phent) 
+    {
+        printf_simple("AT_PHENT: %d\n", (int)g_auxv_phent);
+    }
+    if (g_auxv_phnum) 
+    {
+        printf_simple("AT_PHNUM: %d\n", (int)g_auxv_phnum);
+    }
+    if (g_auxv_pagesz) 
+    {
+        printf_simple("AT_PAGESZ: %d\n", (int)g_auxv_pagesz);
+    }
+    if (g_auxv_base) 
+    {
+        printf_simple("AT_BASE: 0x%x\n", (unsigned int)g_auxv_base);
+    }
+    if (g_auxv_platform) 
+    {
+        printf_simple("AT_PLATFORM: %s\n", g_auxv_platform);
+    }
+    if (g_auxv_execfn) 
+    {
+        printf_simple("AT_EXECFN: %s\n", g_auxv_execfn);
+    }
+    
+    printf_simple("==============================\n");
+}
+
+/**
+ * 从栈指针解析参数
+ * 栈布局：
+ * [sp]: argc (8字节)
+ * [sp+8]: argv[0]
+ * [sp+16]: argv[1]
+ * ...
+ * [sp+8*argc]: NULL (argv 结束)
+ * [sp+8*(argc+1)]: envp[0]
+ * ...
+ * [sp+8*(argc+1+envp_count)]: NULL (envp 结束)
+ * [sp+8*(argc+2+envp_count)]: auxv[0].tag
+ * [sp+8*(argc+2+envp_count)+8]: auxv[0].value
+ * ...
+ * auxv 以 AT_NULL (tag=0, value=0) 结束
+ */
+static void parse_stack(void *stack_ptr, int *argc, char ***argv, char ***envp, uint64_t **auxv)
+{
+    uint64_t *sp = (uint64_t *)stack_ptr;
+    
+    // 读取 argc
+    *argc = (int)sp[0];
+    
+    // 计算 argv 地址（跳过 argc）
+    *argv = (char **)(sp + 1);
+    
+    // 计算 envp 地址（跳过 argv 数组，argc+1 个元素包括 NULL）
+    *envp = (char **)(sp + 1 + (*argc) + 1);
+    
+    // 找到 envp 的结束位置（NULL）
+    char **env = *envp;
+    while (*env != NULL)
+    {
+        env++;
+    }
+    
+    // auxv 在 envp 结束后的下一个位置
+    *auxv = (uint64_t *)(env + 1);
+}
+
+/**
+ * 简单的内存复制函数（不使用 PLT）
+ */
+static void *memcpy_simple(void *dest, const void *src, size_t n)
+{
+    char *d = (char *)dest;
+    const char *s = (const char *)src;
+    for (size_t i = 0; i < n; i++) {
+        d[i] = s[i];
+    }
+    return dest;
+}
+
+/**
+ * 简单的内存设置函数（不使用 PLT）
+ */
+static void *memset_simple(void *s, int c, size_t n)
+{
+    char *p = (char *)s;
+    for (size_t i = 0; i < n; i++) {
+        p[i] = (char)c;
+    }
+    return s;
+}
+
+/**
+ * 从动态段中获取指定标签的值
+ */
+static uint64_t get_dynamic_tag(Elf64_Dyn *dynamic, int64_t tag)
+{
+    if (!dynamic) {
+        return 0;
+    }
+    
+    // 安全检查：确保地址在合理范围内
+    if ((uintptr_t)dynamic < g_auxv_base || 
+        (uintptr_t)dynamic > g_auxv_base + 0x200000) {
+        printf_simple("Warning: dynamic pointer out of range: 0x%x\n", 
+                     (unsigned int)(uintptr_t)dynamic);
+        return 0;
+    }
+    
+    // 限制搜索范围，避免无限循环
+    for (int i = 0; i < 1000; i++) {
+        // 检查当前条目地址是否有效
+        Elf64_Dyn *d = &dynamic[i];
+        if ((uintptr_t)d < g_auxv_base || 
+            (uintptr_t)d > g_auxv_base + 0x200000) {
+            break;
+        }
+        
+        if (d->d_tag == DT_NULL) {
+            break;
+        }
+        
+        if (d->d_tag == tag) {
+            return d->d_val;
+        }
+    }
+    
+    return 0;
+}
+
+/**
+ * 解析符号名称
+ */
+static const char *get_symbol_name(uint64_t strtab, uint32_t st_name)
+{
+    if (!strtab || !st_name) {
+        return NULL;
+    }
+    return (const char *)(strtab + st_name);
+}
+
+/**
+ * 查找符号
+ */
+static Elf64_Sym *find_symbol(const char *name, Elf64_Sym *symtab, 
+                               const char *strtab, uint32_t symnum)
+{
+    if (!name || !symtab || !strtab) {
+        return NULL;
+    }
+    
+    for (uint32_t i = 0; i < symnum; i++) {
+        const char *symname = get_symbol_name((uint64_t)strtab, symtab[i].st_name);
+        if (symname && strncmp_simple(symname, name, 256) == 0) {
+            return &symtab[i];
+        }
+    }
+    
+    return NULL;
+}
+
+/**
+ * 通过LOAD段映射关系计算符号的实际内存地址
+ * 
+ * @param sym_entry 符号表条目
+ * @param base_addr 加载基址
+ * @param phdr 程序头表
+ * @param phnum 程序头表项数量
+ * @return 符号的实际内存地址，如果找不到返回0
+ */
+static uint64_t calculate_symbol_address(Elf64_Sym *sym_entry, uint64_t base_addr,$
+                                         Elf64_Phdr *phdr, uint16_t phnum)
+{
+    if (!sym_entry || !phdr) {
+        return 0;
+    }
+    
+    // 方法1：通过包含符号的LOAD段计算（最准确）
+    uint64_t sym_addr = 0;
+    for (uint16_t i = 0; i < phnum; i++) {
+        Elf64_Phdr *load = &phdr[i];
+        if (load->p_type == PT_LOAD) {
+            // 检查符号的虚拟地址是否在这个LOAD段中
+            if (sym_entry->st_value >= load->p_vaddr && 
+                sym_entry->st_value < load->p_vaddr + load->p_memsz) {
+                // 使用该LOAD段的映射关系
+                uint64_t offset_in_segment = sym_entry->st_value - load->p_vaddr;
+                uint64_t file_offset = load->p_offset + offset_in_segment;
+                sym_addr = base_addr + file_offset;
+                break;
+            }
+        }
+    }
+    
+    return sym_addr;
+}
+
+/**
+ * 通过LOAD段映射关系计算虚拟地址对应的实际内存地址
+ * 
+ * @param vaddr 虚拟地址
+ * @param base_addr 加载基址
+ * @param first_load_vaddr 第一个LOAD段的虚拟地址（地址计算基准）
+ * @param phdr 程序头表
+ * @param phnum 程序头表项数量
+ * @return 实际内存地址，如果找不到返回0
+ */
+static uint64_t calculate_address_from_vaddr_ex(uint64_t vaddr, uint64_t base_addr,$
+                                                uint64_t first_load_vaddr,$
+                                                Elf64_Phdr *phdr, uint16_t phnum)
+{
+    if (!phdr) {
+        return 0;
+    }
+    
+    // 查找包含该虚拟地址的LOAD段
+    printf_simple("calculate_address_from_vaddr: searching for vaddr=0x", (void)0); 
+    char tmp_buf[32]; utoa_hex_simple((unsigned long)vaddr, tmp_buf); printf(tmp_buf);
+    printf_simple(" in %d LOAD segments, first_load_vaddr=0x", (void)phnum); 
+    utoa_hex_simple((unsigned long)first_load_vaddr, tmp_buf); printf(tmp_buf); printf_simple("\n");
+    
+    for (uint16_t i = 0; i < phnum; i++) {
+        Elf64_Phdr *load = &phdr[i];
+        if (load->p_type == PT_LOAD) {
+            uint64_t load_end = load->p_vaddr + load->p_memsz;
+            printf_simple("  LOAD[", (void)0); itoa_simple(i, tmp_buf, 10); printf(tmp_buf);
+            printf_simple("]: vaddr=0x", (void)0); utoa_hex_simple((unsigned long)load->p_vaddr, tmp_buf); printf(tmp_buf);
+            printf_simple("-", (void)0); utoa_hex_simple((unsigned long)load_end, tmp_buf); printf(tmp_buf);
+            printf_simple(", offset=0x", (void)0); utoa_hex_simple((unsigned long)load->p_offset, tmp_buf); printf(tmp_buf);
+            printf_simple(", flags=0x", (void)0); utoa_hex_simple((unsigned int)load->p_flags, tmp_buf); printf(tmp_buf);
+            printf_simple("\n", (void)0);
+            // 检查虚拟地址是否在这个LOAD段中
+            if (vaddr >= load->p_vaddr && vaddr < load_end) {
+                // 通用地址计算：使用第一个 LOAD 段的虚拟地址作为基准
+                // 实际地址 = base_addr + (vaddr - first_load_vaddr)
+                uint64_t result = base_addr + (vaddr - first_load_vaddr);
+                printf_simple("Found LOAD segment: vaddr=0x", (void)0); utoa_hex_simple((unsigned long)vaddr, tmp_buf); printf(tmp_buf);
+                printf_simple(", p_vaddr=0x");; utoa_hex_simple((unsigned long)load->p_vaddr, tmp_buf); printf(tmp_buf);
+                printf_simple(", first_load_vaddr=0x");; utoa_hex_simple((unsigned long)first_load_vaddr, tmp_buf); printf(tmp_buf);
+                printf_simple(", result=0x"); utoa_hex_simple((unsigned long)result, tmp_buf); printf(tmp_buf);
+                printf_simple("\n");
+                return result;
+            }
+        }
+    }
+    
+    return 0;
+}
+
+/**
+ * 通过LOAD段映射关系计算虚拟地址对应的实际内存地址（简化版本，使用第一个 LOAD 段的 vaddr 作为基准）
+ * 
+ * @param vaddr 虚拟地址
+ * @param base_addr 加载基址
+ * @param phdr 程序头表
+ * @param phnum 程序头表项数量
+ * @return 实际内存地址，如果找不到返回0
+ */
+static uint64_t calculate_address_from_vaddr(uint64_t vaddr, uint64_t base_addr,$
+                                             Elf64_Phdr *phdr, uint16_t phnum)
+{
+    // 找到第一个 LOAD 段的虚拟地址作为地址计算基准
+    uint64_t first_load_vaddr = 0;
+    for (uint16_t i = 0; i < phnum; i++) {
+        if (phdr[i].p_type == PT_LOAD) {
+            first_load_vaddr = phdr[i].p_vaddr;
+            break;
+        }
+    }
+    
+    return calculate_address_from_vaddr_ex(vaddr, base_addr, first_load_vaddr, phdr, phnum);
+}
+
+/**
+ * 处理重定位条目
+ * 使用LOAD段映射关系进行地址转换，以兼容各种情况
+ */
+static void process_relocation(Elf64_Rela *rela, uint64_t base_addr,$
+                                Elf64_Sym *symtab, const char *strtab,$
+                                uint32_t symnum, uint64_t *got,$
+                                Elf64_Ehdr *ehdr, Elf64_Phdr *phdr)
+{
+    if (!rela) {
+        return;
+    }
+    
+    // 安全检查：确保rela指针有效
+    if ((uintptr_t)rela < base_addr || (uintptr_t)rela > base_addr + 0x200000) {
+        printf_simple("Error: rela pointer out of range: 0x%x\n", (unsigned int)(uintptr_t)rela);
+        return;
+    }
+    
+    uint32_t type = ELF64_R_TYPE(rela->r_info);
+    uint64_t sym = ELF64_R_SYM(rela->r_info);
+    uint64_t offset = rela->r_offset;  // r_offset是虚拟地址（vaddr）
+    
+    // 计算目标地址：使用通用的LOAD段映射关系
+    // 适用于自举和其他ELF文件
+    // 
+    // base_addr 的含义：
+    //   - 自举：base_addr 是文件偏移0的地址（整个文件被连续加载）
+    //   - 其他ELF文件：base_addr 是第一个LOAD段的加载地址
+    // 
+    // 通用计算公式：实际地址 = base_addr + (vaddr - first_load_vaddr)
+    uint64_t *addr = NULL;
+    
+    if (!ehdr || !phdr) {
+        // 回退：直接使用 base_addr + offset（假设first_load_vaddr=0）
+        addr = (uint64_t *)(base_addr + offset);
+    } else {
+        // 首先尝试使用通用的 calculate_address_from_vaddr
+        // 这适用于所有ELF文件（自举和其他共享库）
+        uint64_t target_addr = calculate_address_from_vaddr(offset, base_addr, phdr, ehdr->e_phnum);
+        
+        if (target_addr != 0) {
+            // 成功找到LOAD段，使用计算结果
+            addr = (uint64_t *)target_addr;
+        } else {
+            // 回退：如果 calculate_address_from_vaddr 失败，使用简化方法
+            // 找到第一个LOAD段，计算文件偏移
+            uint64_t first_load_vaddr = 0;
+            for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
+                Elf64_Phdr *load = &phdr[i];
+                if (load->p_type == PT_LOAD) {
+                    first_load_vaddr = load->p_vaddr;
+                    break;
+                }
+            }
+            // 通用公式：实际地址 = base_addr + (vaddr - first_load_vaddr)
+            addr = (uint64_t *)(base_addr + offset - first_load_vaddr);
+        }
+    }
+    
+    // 安全检查：确保地址在合理范围内
+    if (!addr) {
+        printf_simple("Error: addr is NULL\n");
+        return;
+    }
+    if ((uintptr_t)addr < base_addr || (uintptr_t)addr > base_addr + 0x200000) {
+        printf_simple("Warning: relocation target address out of range: 0x%x\n",$
+                     (unsigned int)(uintptr_t)addr);
+        return;
+    }
+    
+    switch (type) {
+        case 3:  // R_AARCH64_RELATIVE (1027)的低8位是3
+            // 相对重定位：addr = base_addr + addend
+            // addend 是文件偏移，需要转换为实际地址
+            // 注意：R_AARCH64_RELATIVE = 1027 (0x403)，ELF64_R_TYPE(0x403) = 3
+            *addr = base_addr + rela->r_addend;
+            break;
+            
+        case 1:  // R_AARCH64_ABS64 (257) 和 R_AARCH64_GLOB_DAT (1025) 的低8位都是1
+            // 需要根据上下文区分：
+            // - R_AARCH64_ABS64: 用于直接重定位（非GOT/PLT）
+            // - R_AARCH64_GLOB_DAT: 用于GOT条目
+            // 这里统一处理为需要查找符号的情况
+            // 计算公式：S + A，其中 S = 符号地址，A = r_addend
+            if (sym < symnum && symtab) {
+                Elf64_Sym *sym_entry = &symtab[sym];
+                // 通过LOAD段映射关系计算符号地址
+                uint64_t sym_addr = 0;
+                if (ehdr && phdr) {
+                    sym_addr = calculate_symbol_address(sym_entry, base_addr, phdr, ehdr->e_phnum);
+                }
+                
+                // 如果通过LOAD段找不到，使用简化方法（回退）
+                if (sym_addr == 0) {
+                    sym_addr = base_addr + sym_entry->st_value;
+                }
+                
+                *addr = sym_addr + rela->r_addend;
+            } else {
+                printf_simple("Warning: invalid symbol index %d for relocation\n", (unsigned int)sym);
+            }
+            break;
+            
+        case 2:  // R_AARCH64_JUMP_SLOT (1026)的低8位是2
+            // 跳转槽（PLT条目）：需要查找符号
+            // 计算公式：S + A，其中 S = 符号地址，A = r_addend
+            if (sym < symnum && symtab) {
+                Elf64_Sym *sym_entry = &symtab[sym];
+                // 通过LOAD段映射关系计算符号地址
+                uint64_t sym_addr = 0;
+                if (ehdr && phdr) {
+                    sym_addr = calculate_symbol_address(sym_entry, base_addr, phdr, ehdr->e_phnum);
+                }
+                
+                // 如果通过LOAD段找不到，使用简化方法（回退）
+                if (sym_addr == 0) {
+                    sym_addr = base_addr + sym_entry->st_value;
+                }
+                
+                *addr = sym_addr + rela->r_addend;
+            } else {
+                // 如果没有符号，使用 base_addr + addend
+                *addr = base_addr + rela->r_addend;
+            }
+            break;
+            
+        case 0:  // R_AARCH64_NONE (0)
+            // 无操作重定位，忽略
+            break;
+            
+        default:
+            // 未知重定位类型，尝试作为相对重定位处理
+            printf_simple("Warning: unknown relocation type %d, treating as relative\n", type);
+            *addr = base_addr + rela->r_addend;
+            break;
+    }
+}
+
+/**
+ * 自举动态链接器自身
+ * 返回0表示成功，非0表示失败
+ */
+static int bootstrap_self(void)
+{
+    if (g_bootstrap_done)
+    {
+        return 0;  // 已经完成自举
+    }
+    
+    if (!g_auxv_base)
+    {
+        printf_simple("Error: AT_BASE not found in auxv\n");
+        return 1;
+    }
+    
+    printf_simple("Dynamic linker base: 0x%x\n", (unsigned int)g_auxv_base);
+    
+    // 获取ELF头
+    Elf64_Ehdr *ehdr = (Elf64_Ehdr *)g_auxv_base;
+    
+    // 验证ELF魔数
+    if (ehdr->e_ident[0] != 0x7f || 
+        ehdr->e_ident[1] != 'E' || 
+        ehdr->e_ident[2] != 'L' || 
+        ehdr->e_ident[3] != 'F')
+    {
+        printf_simple("Error: Invalid ELF magic\n");
+        return 1;
+    }
+    
+    printf_simple("ELF header validated\n");
+    
+    // 计算程序头表地址
+    Elf64_Phdr *phdr = (Elf64_Phdr *)(g_auxv_base + ehdr->e_phoff);
+    printf_simple("Program header table at: 0x%x (g_auxv_base=0x%x, e_phoff=0x%x)\n",$
+                 (unsigned int)(uintptr_t)phdr, (unsigned int)g_auxv_base, (unsigned int)ehdr->e_phoff);
+    
+    // 查找动态段
+    // 程序头表地址计算：
+    // 
+    // 在动态链接器自举时，内核将整个ELF文件连续加载到内存中。
+    // g_auxv_base是ELF头在内存中的位置，对应文件偏移0。
+    // 由于整个文件被连续加载，文件偏移直接对应内存偏移。
+    // 
+    // 因此，程序头表的地址可以直接计算为：
+    //   phdr = g_auxv_base + e_phoff
+    // 
+    // 这个简单方法总是正确的，因为：
+    // 1. 整个文件被连续加载，文件布局 = 内存布局
+    // 2. g_auxv_base对应文件偏移0（ELF头位置）
+    // 3. e_phoff是程序头表在文件中的偏移
+    // 4. 因此 g_auxv_base + e_phoff 直接给出程序头表在内存中的位置
+    // 
+    // 注意：LOAD段方法（通过p_vaddr和p_offset计算）主要用于加载其他共享库时，
+    // 因为那些库可能只加载LOAD段，而不是整个文件。但在自举时，整个文件都在内存中。
+    
+    Elf64_Dyn *dynamic = NULL;
+    
+    // 查找第一个LOAD段，用于后续的地址转换（动态段、符号表等）
+    uint64_t first_load_vaddr = 0;
+    uint64_t first_load_offset = 0;
+    for (uint16_t i = 0; i < ehdr->e_phnum; i++)
+    {
+        Elf64_Phdr *p = &phdr[i];
+        if (p->p_type == PT_LOAD) {
+            first_load_vaddr = p->p_vaddr;
+            first_load_offset = p->p_offset;
+            printf_simple("First LOAD segment: vaddr=0x%x, offset=0x%x\n", 
+                         (unsigned int)first_load_vaddr, (unsigned int)first_load_offset);
+            break;
+        }
+    }
+    
+    // 遍历程序头表查找动态段
+    for (uint16_t i = 0; i < ehdr->e_phnum; i++)
+    {
+        Elf64_Phdr *p = &phdr[i];
+        if (p->p_type == PT_DYNAMIC) {
+            // 动态段的地址计算：
+            // 共享库按照LOAD段的虚拟地址加载，g_auxv_base是第一个LOAD段的加载地址。
+            // 如果第一个LOAD段的虚拟地址是0，则：
+            //   memaddr = g_auxv_base + p_vaddr
+            // 
+            // 如果第一个LOAD段的虚拟地址不是0，需要找到包含动态段的LOAD段：
+            //   找到包含p_vaddr的LOAD段，使用该段的映射关系计算
+            
+            // 计算动态段的内存地址
+            // 对于共享库，g_auxv_base是第一个LOAD段的加载地址
+            // 如果第一个LOAD段的虚拟地址是0，则所有虚拟地址都可以直接加上g_auxv_base
+            uint64_t dynamic_memaddr = 0;
+            
+            if (first_load_vaddr == 0) {
+                // 最简单的情况：第一个LOAD段的虚拟地址是0
+                // 直接使用：memaddr = g_auxv_base + p_vaddr
+                dynamic_memaddr = g_auxv_base + p->p_vaddr;
+                printf_simple("Using simple calculation: g_auxv_base + p_vaddr = 0x%x + 0x%x = 0x%x\n",$
+                             (unsigned int)g_auxv_base, (unsigned int)p->p_vaddr, (unsigned int)dynamic_memaddr);
+            } else {
+                // 第一个LOAD段的虚拟地址不是0的情况
+                // 需要找到包含动态段的LOAD段，使用该段的映射关系
+                Elf64_Phdr *containing_load = NULL;
+                for (uint16_t j = 0; j < ehdr->e_phnum; j++) {
+                    Elf64_Phdr *load = &phdr[j];
+                    if (load->p_type == PT_LOAD) {
+                        if (p->p_vaddr >= load->p_vaddr && 
+                            p->p_vaddr < load->p_vaddr + load->p_memsz) {
+                            containing_load = load;
+                            break;
+                        }
+                    }
+                }
+                
+                if (containing_load) {
+                    // 计算动态段在包含它的LOAD段中的偏移
+                    uint64_t offset_in_segment = p->p_vaddr - containing_load->p_vaddr;
+                    
+                    // 计算包含动态段的LOAD段的加载地址
+                    // 该LOAD段的加载地址 = g_auxv_base + (load->p_vaddr - first_load_vaddr)
+                    uint64_t load_base_addr = g_auxv_base + (containing_load->p_vaddr - first_load_vaddr);
+                    
+                    // 动态段的内存地址 = LOAD段加载地址 + 段内偏移
+                    dynamic_memaddr = load_base_addr + offset_in_segment;
+                    
+                    printf_simple("Using LOAD segment mapping: load_base=0x%x, offset_in_segment=0x%x, memaddr=0x%x\n",$
+                                 (unsigned int)load_base_addr, 
+                                 (unsigned int)offset_in_segment,$
+                                 (unsigned int)dynamic_memaddr);
+                } else {
+                    // 如果没找到包含动态段的LOAD段，使用简化方法
+                    printf_simple("Warning: Cannot find LOAD segment containing dynamic segment, using fallback\n");
+                    // 简化计算：假设虚拟地址空间连续
+                    dynamic_memaddr = g_auxv_base + (p->p_vaddr - first_load_vaddr);
+                }
+            }
+            
+            dynamic = (Elf64_Dyn *)dynamic_memaddr;
+            printf_simple("Found dynamic segment: vaddr=0x%x, offset=0x%x, memaddr=0x%x\n", 
+                         (unsigned int)p->p_vaddr, 
+                         (unsigned int)p->p_offset,$
+                         (unsigned int)(uintptr_t)dynamic);
+            break;
+        }
+    }
+    
+    if (!dynamic) {
+        printf_simple("Error: Dynamic segment not found\n");
+        return 1;
+    }
+    
+    // 验证动态段地址是否有效（简单检查：在合理范围内）
+    if ((uintptr_t)dynamic < g_auxv_base || 
+        (uintptr_t)dynamic > g_auxv_base + 0x1000000) {
+        printf_simple("Error: Dynamic segment address out of range: 0x%x\n", 
+                     (unsigned int)(uintptr_t)dynamic);
+        return 1;
+    }
+    
+    printf_simple("Accessing dynamic segment at 0x%x...\n", (unsigned int)(uintptr_t)dynamic);
+    
+    // 尝试读取第一个动态条目来验证地址是否有效
+    // 使用volatile避免编译器优化
+    volatile Elf64_Dyn *test_dyn = dynamic;
+    volatile int64_t test_tag = test_dyn->d_tag;
+    printf_simple("First dynamic tag: 0x%x\n", (unsigned int)test_tag);
+    
+    // 获取动态段中的关键信息
+    uint64_t strtab_addr = get_dynamic_tag((Elf64_Dyn *)dynamic, DT_STRTAB);
+    uint64_t symtab_addr = get_dynamic_tag((Elf64_Dyn *)dynamic, DT_SYMTAB);
+    uint64_t rela_addr = get_dynamic_tag(dynamic, DT_RELA);
+    uint64_t rela_size = get_dynamic_tag(dynamic, DT_RELASZ);
+    uint64_t rela_ent = get_dynamic_tag(dynamic, DT_RELAENT);
+    uint64_t pltrel_addr = get_dynamic_tag(dynamic, DT_JMPREL);
+    uint64_t pltrel_size = get_dynamic_tag(dynamic, DT_PLTRELSZ);
+    uint64_t got_addr = get_dynamic_tag(dynamic, DT_PLTGOT);
+    
+    if (!strtab_addr || !symtab_addr) {
+        printf_simple("Error: Missing required dynamic tags (strtab=0x%x, symtab=0x%x)\n",$
+                     (unsigned int)strtab_addr, (unsigned int)symtab_addr);
+        return 1;
+    }
+    
+    // 计算strtab和symtab的实际内存地址
+    // 在动态链接器自举时，整个文件被连续加载，文件偏移直接对应内存偏移。
+    // strtab_addr和symtab_addr是虚拟地址，需要转换为文件偏移，然后使用文件偏移。
+    // 
+    // 转换方法：
+    // 1. 找到包含strtab/symtab的LOAD段
+    // 2. 计算在LOAD段中的相对偏移：offset_in_segment = vaddr - load->p_vaddr
+    // 3. 计算文件偏移：file_offset = load->p_offset + offset_in_segment
+    // 4. 计算实际地址：memaddr = g_auxv_base + file_offset
+    
+    uint64_t strtab_memaddr = 0;
+    uint64_t symtab_memaddr = 0;
+    
+    // 查找包含这些地址的LOAD段
+    for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
+        Elf64_Phdr *load = &phdr[i];
+        if (load->p_type == PT_LOAD) {
+            // 计算strtab地址
+            if (strtab_memaddr == 0 && strtab_addr >= load->p_vaddr && 
+                strtab_addr < load->p_vaddr + load->p_memsz) {
+                // 使用该LOAD段的映射关系
+                uint64_t offset_in_segment = strtab_addr - load->p_vaddr;
+                uint64_t file_offset = load->p_offset + offset_in_segment;
+                strtab_memaddr = g_auxv_base + file_offset;
+                //printf_simple("1111strtab: vaddr=0x%x, memaddr=0x%x\n", 
+                             //(unsigned int)strtab_addr, (unsigned int)strtab_memaddr);
+                //printf_simple("11111p_vaddr: 0x%x, p_offset: 0x%x\n", (unsigned int)load->p_vaddr, (unsigned int)load->p_offset);
+            }
+            // 计算symtab地址
+            if (symtab_memaddr == 0 && symtab_addr >= load->p_vaddr && 
+                symtab_addr < load->p_vaddr + load->p_memsz) {
+                // 使用该LOAD段的映射关系
+                uint64_t offset_in_segment = symtab_addr - load->p_vaddr;
+                uint64_t file_offset = load->p_offset + offset_in_segment;
+                symtab_memaddr = g_auxv_base + file_offset;
+                //printf_simple("symtab: vaddr=0x%x, memaddr=0x%x, p_vaddr=0x%x, p_offset=0x%x\n", 
+                             //(unsigned int)symtab_addr, (unsigned int)symtab_memaddr, 
+                             //(unsigned int)load->p_vaddr, (unsigned int)load->p_offset);
+                //printf_simple("22222symtab: vaddr=0x%x, memaddr=0x%x\n", 
+                             //(unsigned int)symtab_addr, (unsigned int)symtab_memaddr);
+                //printf_simple("22222p_vaddr: 0x%x, p_offset: 0x%x\n", (unsigned int)load->p_vaddr, (unsigned int)load->p_offset);
+            }
+            if (strtab_memaddr != 0 && symtab_memaddr != 0) {
+                break;
+            }
+        }
+    }
+    
+    // 如果没找到，使用简化方法（假设第一个LOAD段的p_offset=0，且虚拟地址空间连续）
+    // 这适用于大多数情况（PIE/共享库）
+    if (strtab_memaddr == 0) {
+        if (first_load_offset == 0) {
+            // 如果第一个LOAD段的p_offset=0，可以使用简化公式
+            strtab_memaddr = g_auxv_base + strtab_addr - first_load_vaddr;
+        } else {
+            printf_simple("Warning: Cannot determine strtab address (first_load_offset != 0)\n");
+        }
+    }
+    if (symtab_memaddr == 0) {
+        if (first_load_offset == 0) {
+            // 如果第一个LOAD段的p_offset=0，可以使用简化公式
+            symtab_memaddr = g_auxv_base + symtab_addr - first_load_vaddr;
+        } else {
+            printf_simple("Warning: Cannot determine symtab address (first_load_offset != 0)\n");
+        }
+    }
+    
+    // 最后的回退（不应该到达这里）
+    if (strtab_memaddr == 0) {
+        printf_simple("Error: Cannot determine strtab address\n");
+        return 1;
+    }
+    if (symtab_memaddr == 0) {
+        printf_simple("Error: Cannot determine symtab address\n");
+        return 1;
+    }
+    
+    printf_simple("strtab: vaddr=0x%x, memaddr=0x%x\n", 
+                  (unsigned int)strtab_addr, (unsigned int)strtab_memaddr);
+    printf_simple("symtab: vaddr=0x%x, memaddr=0x%x\n", 
+                  (unsigned int)symtab_addr, (unsigned int)symtab_memaddr);
+    
+    // 计算符号表大小
+    // 简化方法：从hash表获取，或者通过strtab大小估算
+    // 这里我们使用一个较大的值，实际应该从hash表获取
+    uint32_t symnum = 2000;  // 临时值，实际应该从hash表获取
+    
+    const char *strtab = (const char *)strtab_memaddr;
+    Elf64_Sym *symtab = (Elf64_Sym *)symtab_memaddr;
+    
+    // 验证地址有效性（简单检查）
+    if ((uintptr_t)strtab < g_auxv_base || (uintptr_t)symtab < g_auxv_base) {
+        printf_simple("Warning: strtab or symtab address seems invalid\n");
+    }
+    
+    // 处理重定位表
+    if (rela_addr && rela_size && rela_ent) {
+        uint32_t rela_count = rela_size / rela_ent;
+        
+        // 计算rela的实际内存地址：使用LOAD段映射关系
+        uint64_t rela_memaddr = calculate_address_from_vaddr(rela_addr, g_auxv_base, phdr, ehdr->e_phnum);
+        if (rela_memaddr == 0) {
+            // 回退：使用简化方法
+            if (first_load_offset == 0) {
+                rela_memaddr = g_auxv_base + rela_addr - first_load_vaddr;
+            } else {
+                rela_memaddr = g_auxv_base + rela_addr;
+            }
+        }
+        
+        Elf64_Rela *rela = (Elf64_Rela *)rela_memaddr;
+        
+        printf_simple("Processing %d relocations at 0x%x...\n", 
+                     rela_count, (unsigned int)rela_memaddr);
+        
+        for (uint32_t i = 0; i < rela_count; i++) {
+            // 安全检查：确保rela地址有效
+            if ((uintptr_t)&rela[i] < g_auxv_base || 
+                (uintptr_t)&rela[i] > g_auxv_base + 0x200000) {
+                printf_simple("Warning: rela[%d] address out of range: 0x%x\n", 
+                             i, (unsigned int)(uintptr_t)&rela[i]);
+                break;
+            }
+            // 先读取rela[i]的字段，避免在printf中重复访问
+            uint32_t rel_type = ELF64_R_TYPE(rela[i].r_info);
+            uint64_t rel_offset = rela[i].r_offset;
+            // printf_simple("Processing relocation[%d]: type=%d, offset=0x%x\n",$
+            //              i, rel_type, (unsigned int)rel_offset);
+            
+            // 处理重定位
+            process_relocation(&rela[i], g_auxv_base, symtab, strtab, symnum, (uint64_t *)got_addr, ehdr, phdr);
+        }
+        
+        printf_simple("Relocations processed\n");
+    }
+    
+    // 处理PLT重定位表
+    if (pltrel_addr && pltrel_size && rela_ent) {
+        uint32_t pltrel_count = pltrel_size / rela_ent;
+        
+        // 计算pltrel的实际内存地址：使用LOAD段映射关系
+        uint64_t pltrel_memaddr = calculate_address_from_vaddr(pltrel_addr, g_auxv_base, phdr, ehdr->e_phnum);
+        if (pltrel_memaddr == 0) {
+            // 回退：使用简化方法
+            if (first_load_offset == 0) {
+                pltrel_memaddr = g_auxv_base + pltrel_addr - first_load_vaddr;
+            } else {
+                pltrel_memaddr = g_auxv_base + pltrel_addr;
+            }
+        }
+        
+        Elf64_Rela *pltrel = (Elf64_Rela *)pltrel_memaddr;
+        
+        printf_simple("Processing %d PLT relocations at 0x%x...\n", 
+                     pltrel_count, (unsigned int)pltrel_memaddr);
+        
+        for (uint32_t i = 0; i < pltrel_count; i++) {
+            process_relocation(&pltrel[i], g_auxv_base, symtab, strtab, symnum, (uint64_t *)got_addr, ehdr, phdr);
+        }
+        
+        printf_simple("PLT relocations processed\n");
+    }
+    
+    g_bootstrap_done = 1;
+    return 0;
+}
+
+/**
+ * 简单的字符串复制函数（不使用 PLT）
+ */
+static char *strdup_simple(const char *s)
+{
+    if (!s) return NULL;
+    size_t len = strlen_simple(s);
+    char *dup = malloc(len + 1);
+    if (!dup) return NULL;
+    memcpy_simple(dup, s, len + 1);
+    return dup;
+}
+
+/**
+ * 简单的字符串连接函数
+ */
+static char *strcat_simple(char *dest, const char *src)
+{
+    if (!dest || !src) return dest;
+    size_t dest_len = strlen_simple(dest);
+    size_t src_len = strlen_simple(src);
+    memcpy_simple(dest + dest_len, src, src_len + 1);
+    return dest;
+}
+
+/**
+ * 简单的路径拼接函数
+ */
+static char *path_join(const char *dir, const char *file)
+{
+    if (!dir || !file) return NULL;
+    size_t dir_len = strlen_simple(dir);
+    size_t file_len = strlen_simple(file);
+    char *path = malloc(dir_len + file_len + 2);
+    if (!path) return NULL;
+    memcpy_simple(path, dir, dir_len);
+    if (dir[dir_len - 1] != '/') {
+        path[dir_len] = '/';
+        dir_len++;
+    }
+    memcpy_simple(path + dir_len, file, file_len + 1);
+    return path;
+}
+
+/**
+ * 检查文件是否存在
+ */
+static int file_exists(const char *path)
+{
+    int fd = open(path, O_RDONLY, 0);
+    if (fd >= 0) {
+        close(fd);
+        return 1;
+    }
+    return 0;
+}
+
+/**
+ * 计算字符串的哈希值（用于符号表）
+ */
+static uint32_t hash_string(const char *str)
+{
+    uint32_t hash = 5381;
+    int c;
+    while ((c = *str++)) {
+        hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
+    }
+    return hash;
+}
+
+/**
+ * 查找已加载的库（通过路径）
+ */
+static LoadedLibrary *find_loaded_library(const char *path)
+{
+    LoadedLibrary *lib = g_loaded_libraries;
+    while (lib) {
+        if (lib->path && strncmp_simple(lib->path, path, 512) == 0) {
+            return lib;
+        }
+        lib = lib->next;
+    }
+    return NULL;
+}
+
+/**
+ * 从动态段中获取指定标签的值（无安全检查版本，用于可执行文件）
+ */
+static uint64_t get_dynamic_tag_unsafe(Elf64_Dyn *dynamic, int64_t tag)
+{
+    if (!dynamic) {
+        return 0;
+    }
+    
+    // 限制搜索范围，避免无限循环
+    for (int i = 0; i < 1000; i++) {
+        if (dynamic[i].d_tag == DT_NULL) {
+            break;
+        }
+        
+        if (dynamic[i].d_tag == tag) {
+            return dynamic[i].d_val;
+        }
+    }
+    
+    return 0;
+}
+
+/**
+ * 解析可执行文件的动态段
+ * 返回依赖库名称列表（通过参数返回）
+ */
+static int parse_executable_dynamic(char ***needed_libs, int *needed_count)
+{
+    if (!g_auxv_phdr || !g_auxv_phnum) {
+        printf("Error: Program header not available\n");
+        return 1;
+    }
+    
+    Elf64_Phdr *phdr = (Elf64_Phdr *)g_auxv_phdr;
+    Elf64_Dyn *dynamic = NULL;
+    uint64_t dynamic_vaddr = 0;
+    
+    // 查找动态段和第一个 LOAD 段
+    uint64_t first_load_vaddr = 0;
+    uint64_t first_load_paddr = 0;
+    for (uint16_t i = 0; i < g_auxv_phnum; i++) {
+        if (phdr[i].p_type == PT_LOAD && first_load_vaddr == 0) {
+            first_load_vaddr = phdr[i].p_vaddr;
+            first_load_paddr = (uint64_t)phdr[i].p_vaddr;  // 对于可执行文件，p_vaddr 是实际地址
+        }
+        if (phdr[i].p_type == PT_DYNAMIC) {
+            dynamic_vaddr = phdr[i].p_vaddr;
+            // 对于可执行文件，p_vaddr 是实际地址（内核已映射）
+            dynamic = (Elf64_Dyn *)phdr[i].p_vaddr;
+            break;
+        }
+    }
+    
+    if (!dynamic) {
+        printf("No dynamic segment found in executable\n");
+        *needed_count = 0;
+        *needed_libs = NULL;
+        return 0;  // 不是错误，可能是静态链接
+    }
+    
+    printf("Found executable dynamic segment at 0x%x\n", (unsigned int)(uintptr_t)dynamic);
+    
+    // 获取字符串表地址（使用无安全检查版本）
+    uint64_t strtab_vaddr = get_dynamic_tag_unsafe(dynamic, DT_STRTAB);
+    if (!strtab_vaddr) {
+        printf("Error: DT_STRTAB not found\n");
+        return 1;
+    }
+    
+    // 转换虚拟地址为实际地址
+    // 对于可执行文件，如果第一个 LOAD 段的 p_vaddr 是实际地址，则：
+    // 实际地址 = first_load_paddr + (strtab_vaddr - first_load_vaddr)
+    uint64_t strtab_addr = 0;
+    if (first_load_vaddr != 0) {
+        strtab_addr = first_load_paddr + (strtab_vaddr - first_load_vaddr);
+    } else {
+        strtab_addr = strtab_vaddr;  // 如果 first_load_vaddr 为 0，则直接使用
+    }
+    
+    const char *strtab = (const char *)strtab_addr;
+    printf("Executable strtab at vaddr=0x%x, actual=0x%x\n", 
+           (unsigned int)strtab_vaddr, (unsigned int)strtab_addr);
+    
+    // 统计 DT_NEEDED 数量
+    int count = 0;
+    for (int i = 0; i < 1000; i++) {
+        if (dynamic[i].d_tag == DT_NULL) break;
+        if (dynamic[i].d_tag == DT_NEEDED) count++;
+    }
+    
+    printf("Found %d needed libraries\n", count);
+    
+    if (count == 0) {
+        *needed_count = 0;
+        *needed_libs = NULL;
+        return 0;
+    }
+    
+    // 分配内存并收集依赖
+    char **libs = malloc(count * sizeof(char *));
+    if (!libs) {
+        printf("Error: Failed to allocate memory for needed libraries\n");
+        return 1;
+    }
+    
+    int idx = 0;
+    for (int i = 0; i < 1000; i++) {
+        if (dynamic[i].d_tag == DT_NULL) break;
+        if (dynamic[i].d_tag == DT_NEEDED) {
+            const char *libname = strtab + dynamic[i].d_val;
+            printf("Needed library: %s\n", libname);
+            libs[idx] = strdup_simple(libname);
+            if (!libs[idx]) {
+                printf("Error: Failed to duplicate library name\n");
+                // 清理已分配的内存
+                for (int j = 0; j < idx; j++) {
+                    free(libs[j]);
+                }
+                free(libs);
+                return 1;
+            }
+            idx++;
+        }
+    }
+    
+    *needed_libs = libs;
+    *needed_count = count;
+    return 0;
+}
+
+/**
+ * 搜索库文件
+ * 支持 LD_LIBRARY_PATH 和默认路径
+ */
+static char *search_library(const char *libname)
+{
+    if (!libname) return NULL;
+    
+    // 如果是绝对路径，直接检查
+    if (libname[0] == '/') {
+        if (file_exists(libname)) {
+            return strdup_simple(libname);
+        }
+        return NULL;
+    }
+    
+    // 首先搜索可执行文件所在目录和 ../lib 目录
+    if (g_auxv_execfn) {
+        // 提取可执行文件目录
+        const char *exec_path = g_auxv_execfn;
+        size_t exec_len = strlen_simple(exec_path);
+        
+        // 查找最后一个 '/'
+        int last_slash = -1;
+        for (int i = exec_len - 1; i >= 0; i--) {
+            if (exec_path[i] == '/') {
+                last_slash = i;
+                break;
+            }
+        }
+        
+        if (last_slash >= 0) {
+            // 提取目录路径
+            char *exec_dir = malloc(last_slash + 1);
+            if (exec_dir) {
+                memcpy_simple(exec_dir, exec_path, last_slash);
+                exec_dir[last_slash] = '\0';
+                
+                // 搜索可执行文件目录
+                char *full_path = path_join(exec_dir, libname);
+                if (full_path && file_exists(full_path)) {
+                    free(exec_dir);
+                    return full_path;
+                }
+                if (full_path) free(full_path);
+                
+                // 搜索 ../lib 目录
+                char *lib_dir = malloc(last_slash + 6);  // "../lib" + null
+                if (lib_dir) {
+                    memcpy_simple(lib_dir, exec_dir, last_slash);
+                    memcpy_simple(lib_dir + last_slash, "/../lib", 7);
+                    
+                    full_path = path_join(lib_dir, libname);
+                    free(lib_dir);
+                    
+                    if (full_path && file_exists(full_path)) {
+                        free(exec_dir);
+                        return full_path;
+                    }
+                    if (full_path) free(full_path);
+                }
+                
+                free(exec_dir);
+            }
+        }
+    }
+    
+    // 检查 LD_LIBRARY_PATH
+    char *ld_library_path = get_env("LD_LIBRARY_PATH");
+    if (ld_library_path) {
+        // 解析路径（以冒号分隔）
+        char *path = ld_library_path;
+        char *end;
+        while (*path) {
+            end = path;
+            while (*end && *end != ':') end++;
+            
+            size_t dir_len = end - path;
+            if (dir_len > 0) {
+                char *dir = malloc(dir_len + 1);
+                if (dir) {
+                    memcpy_simple(dir, path, dir_len);
+                    dir[dir_len] = '\0';
+                    
+                    char *full_path = path_join(dir, libname);
+                    free(dir);
+                    
+                    if (full_path && file_exists(full_path)) {
+                        return full_path;
+                    }
+                    if (full_path) free(full_path);
+                }
+            }
+            
+            if (*end == ':') {
+                path = end + 1;
+            } else {
+                break;
+            }
+        }
+    }
+    
+    // 默认搜索路径
+    const char *default_paths[] = {
+        "/lib",$
+        "/usr/lib",$
+        "/usr/local/lib",$
+        NULL
+    };
+    
+    for (int i = 0; default_paths[i]; i++) {
+        char *full_path = path_join(default_paths[i], libname);
+        if (full_path && file_exists(full_path)) {
+            return full_path;
+        }
+        if (full_path) free(full_path);
+    }
+    
+    return NULL;
+}
+
+/**
+ * 加载共享库
+ */
+static LoadedLibrary *load_shared_library(const char *path)
+{
+    if (!path) {
+        printf("Error: Library path is NULL\n");
+        return NULL;
+    }
+    
+    // 检查是否已经加载
+    LoadedLibrary *existing = find_loaded_library(path);
+    if (existing) {
+        printf("Library %s already loaded\n", path);
+        return existing;
+    }
+    
+    printf("Loading library: %s\n", path);
+    
+    // 打开文件
+    int fd = open(path, O_RDONLY, 0);
+    if (fd < 0) {
+        printf("Error: Failed to open library %s\n", path);
+        return NULL;
+    }
+    
+    // 读取 ELF 头
+    Elf64_Ehdr ehdr;
+    ssize_t n = read(fd, &ehdr, sizeof(ehdr));
+    if (n != sizeof(ehdr)) {
+        printf("Error: Failed to read ELF header\n");
+        close(fd);
+        return NULL;
+    }
+    
+    // 验证 ELF 魔数
+    if (ehdr.e_ident[0] != 0x7f || 
+        ehdr.e_ident[1] != 'E' || 
+        ehdr.e_ident[2] != 'L' || 
+        ehdr.e_ident[3] != 'F') {
+        printf("Error: Invalid ELF magic in %s\n", path);
+        close(fd);
+        return NULL;
+    }
+    
+    // 读取程序头表
+    if (lseek(fd, ehdr.e_phoff, SEEK_SET) < 0) {
+        printf("Error: Failed to seek to program header\n");
+        close(fd);
+        return NULL;
+    }
+    
+    Elf64_Phdr *phdr = malloc(ehdr.e_phnum * sizeof(Elf64_Phdr));
+    if (!phdr) {
+        printf("Error: Failed to allocate memory for program headers\n");
+        close(fd);
+        return NULL;
+    }
+    
+    // 使用 lseek 确保文件位置正确
+    if (lseek(fd, ehdr.e_phoff, SEEK_SET) == -1) {
+        printf("Error: Failed to seek to program header offset\n");
+        free(phdr);
+        close(fd);
+        return NULL;
+    }
+    
+    n = read(fd, phdr, ehdr.e_phnum * sizeof(Elf64_Phdr));
+    if (n != (ssize_t)(ehdr.e_phnum * sizeof(Elf64_Phdr))) {
+        printf_simple("Error: Failed to read program headers (read %d bytes, expected %d)\n",$
+                    (int)n, (int)(ehdr.e_phnum * sizeof(Elf64_Phdr)));
+        free(phdr);
+        close(fd);
+        return NULL;
+    }
+    
+    printf("Library %s: e_phnum=%d, e_phoff=0x%x\n", 
+           path, (int)ehdr.e_phnum, (unsigned int)ehdr.e_phoff);
+    
+    char hex_buf[32];  // 用于十六进制打印
+    
+    // 第一次遍历：找到第一个 LOAD 段（用于确定文件映射基址）
+    // 第二次遍历：找到 PT_DYNAMIC 段
+    // 第三次遍历：找到包含 PT_DYNAMIC 的 LOAD 段（用于地址计算基准）
+    uint64_t first_load_vaddr = 0;
+    uint64_t dynamic_vaddr = 0;
+    uint64_t dynamic_load_vaddr = 0;
+    int found_load = 0;
+    int found_dynamic = 0;
+    int found_dynamic_load = 0;
+    
+    for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
+        // 直接读取，不使用 volatile（因为 phdr 已经在内存中）
+        uint32_t p_type = phdr[i].p_type;
+        uint64_t p_vaddr = phdr[i].p_vaddr;
+        
+        char hex_buf[32];
+        utoa_hex_simple((unsigned int)p_type, hex_buf);
+        printf_simple("  PHDR["); itoa_simple(i, hex_buf, 10); printf_simple(hex_buf);
+        printf_simple("]: type=0x"); printf_simple(hex_buf);
+        printf_simple(", vaddr=0x"); utoa_hex_simple((unsigned long)p_vaddr, hex_buf); printf_simple(hex_buf);
+        printf_simple("\n");
+        
+        if (p_type == PT_LOAD && !found_load) {
+            // 第一个 LOAD 段：用于文件映射
+            first_load_vaddr = p_vaddr;
+            found_load = 1;
+            printf_simple("  First LOAD segment at index "); itoa_simple(i, hex_buf, 10); 
+            printf_simple(hex_buf); printf_simple(", vaddr=0x"); 
+            utoa_hex_simple((unsigned long)first_load_vaddr, hex_buf); printf_simple(hex_buf);
+            printf_simple(" (for mapping)\n");
+        }
+        
+        if (p_type == PT_DYNAMIC) {
+            // PT_DYNAMIC 段：记录其虚拟地址
+            dynamic_vaddr = p_vaddr;
+            found_dynamic = 1;
+            printf_simple("  PT_DYNAMIC segment at index "); itoa_simple(i, hex_buf, 10); 
+            printf_simple(hex_buf); printf_simple(", vaddr=0x"); 
+            utoa_hex_simple((unsigned long)dynamic_vaddr, hex_buf); printf_simple(hex_buf);
+            printf_simple("\n");
+        }
+    }
+    
+    if (!found_load) {
+        printf("Error: No LOAD segment found in %s (searched %d program headers)\n", 
+               path, (int)ehdr.e_phnum);
+        free(phdr);
+        close(fd);
+        return NULL;
+    }
+    
+    if (!found_dynamic) {
+        printf("Error: PT_DYNAMIC segment not found in %s\n", path);
+        free(phdr);
+        close(fd);
+        return NULL;
+    }
+    
+    // 找到包含 PT_DYNAMIC 的 LOAD 段
+    for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
+        if (phdr[i].p_type == PT_LOAD) {
+            uint64_t load_start = phdr[i].p_vaddr;
+            uint64_t load_end = phdr[i].p_vaddr + phdr[i].p_memsz;
+            
+            if (dynamic_vaddr >= load_start && dynamic_vaddr < load_end) {
+                dynamic_load_vaddr = phdr[i].p_vaddr;
+                found_dynamic_load = 1;
+                char hex_buf[32];
+                printf("  PT_DYNAMIC is in LOAD segment "); itoa_simple(i, hex_buf, 10); printf(hex_buf);
+                printf(", vaddr=0x"); utoa_hex_simple((unsigned long)dynamic_load_vaddr, hex_buf); printf(hex_buf);
+                printf(" (for address calc)\n");
+                break;
+            }
+        }
+    }
+    
+    if (!found_dynamic_load) {
+        printf("Error: No LOAD segment containing PT_DYNAMIC found in %s\n", path);
+        free(phdr);
+        close(fd);
+        return NULL;
+    }
+    
+    printf("  First LOAD vaddr=0x"); utoa_hex_simple((unsigned long)first_load_vaddr, hex_buf); printf(hex_buf);
+    printf(", PT_DYNAMIC vaddr=0x"); utoa_hex_simple((unsigned long)dynamic_vaddr, hex_buf); printf(hex_buf);
+    printf(", PT_DYNAMIC LOAD vaddr=0x"); utoa_hex_simple((unsigned long)dynamic_load_vaddr, hex_buf); printf(hex_buf);
+    printf("\n");
+    
+    // 使用第一个 LOAD 段的虚拟地址作为地址计算基准
+    uint64_t vaddr_base = first_load_vaddr;
+    printf("  Using first LOAD vaddr as base: 0x"); 
+    utoa_hex_simple((unsigned long)vaddr_base, hex_buf); printf(hex_buf); printf("\n");
+    
+    // 计算所需的总内存大小（所有 LOAD 段的最大地址）
+    uint64_t max_vaddr = 0;
+    uint64_t max_memsz = 0;
+    for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
+        if (phdr[i].p_type == PT_LOAD) {
+            uint64_t end = phdr[i].p_vaddr + phdr[i].p_memsz;
+            if (end > max_vaddr + max_memsz) {
+                max_vaddr = phdr[i].p_vaddr;
+                max_memsz = end - phdr[i].p_vaddr;
+            }
+        }
+    }
+    
+    // 页对齐
+    uint64_t total_size = ((max_vaddr - first_load_vaddr + max_memsz + 4095) / 4096) * 4096;
+    
+    // 让内核选择基址，先映射匿名内存
+    void *base_addr = mmap(NULL, total_size, PROT_NONE,$
+                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (base_addr == MAP_FAILED || !base_addr) {
+        printf("Error: Failed to allocate memory for library\n");
+        free(phdr);
+        close(fd);
+        return NULL;
+    }
+    
+    printf("Allocated memory at 0x%x, size=0x%x\n", 
+           (unsigned int)(uintptr_t)base_addr, (unsigned int)total_size);
+    
+    // 映射所有 LOAD 段
+    for (uint16_t i = 0; i < ehdr.e_phnum; i++) {
+        if (phdr[i].p_type == PT_LOAD) {
+            uint64_t offset = phdr[i].p_vaddr - first_load_vaddr;
+            void *load_addr = (char *)base_addr + offset;
+            
+            // 页对齐：地址和文件偏移必须页对齐
+            uint64_t page_mask = 4095;  // 0xFFF
+            uint64_t load_addr_aligned = ((uint64_t)load_addr) & ~page_mask;
+            uint64_t offset_in_page = ((uint64_t)load_addr) & page_mask;
+            uint64_t file_offset_aligned = phdr[i].p_offset & ~page_mask;
+            uint64_t file_offset_in_page = phdr[i].p_offset & page_mask;
+            
+            // 计算需要映射的大小（包含页内偏移）
+            uint64_t map_size = ((phdr[i].p_memsz + offset_in_page + 4095) / 4096) * 4096;
+            
+            int prot = 0;
+            if (phdr[i].p_flags & 0x1) prot |= PROT_EXEC;
+            if (phdr[i].p_flags & 0x2) prot |= PROT_WRITE;
+            if (phdr[i].p_flags & 0x4) prot |= PROT_READ;
+            
+            printf("Mapping LOAD segment %d: vaddr=0x%x, load_addr=0x%x, aligned=0x%x, size=0x%x, file_offset=0x%x, aligned=0x%x, prot=0x%x\n",$
+                   i, (unsigned int)phdr[i].p_vaddr,$
+                   (unsigned int)(uintptr_t)load_addr,$
+                   (unsigned int)load_addr_aligned,$
+                   (unsigned int)map_size,$
+                   (unsigned int)phdr[i].p_offset,$
+                   (unsigned int)file_offset_aligned, prot);
+            
+            // 映射段
+            void *mapped = mmap((void *)load_addr_aligned, map_size, prot,$
+                               MAP_PRIVATE | MAP_FIXED, fd, file_offset_aligned);
+            if (mapped != (void *)load_addr_aligned) {
+                printf("Error: Failed to map LOAD segment %d at 0x%x (mmap returned 0x%x)\n", 
+                       i, (unsigned int)load_addr_aligned, (unsigned int)(uintptr_t)mapped);
+                munmap(base_addr, total_size);
+                free(phdr);
+                close(fd);
+                return NULL;
+            }
+            printf("Successfully mapped LOAD segment %d\n", i);
+        }
+    }
+    
+    close(fd);
+    
+    // 计算实际基址
+    uint64_t actual_base = (uint64_t)base_addr;
+    
+    // 查找动态段（使用记录的 dynamic_vaddr）
+    Elf64_Dyn *dynamic = NULL;
+    printf("Searching for PT_DYNAMIC segment...\n");
+    
+    // dynamic_vaddr 已在第一次遍历时记录
+    printf("  PT_DYNAMIC vaddr=0x"); 
+    char tmp_buf[32];
+    utoa_hex_simple((unsigned long)dynamic_vaddr, tmp_buf); printf(tmp_buf); printf("\n");
+    
+    // 使用正确的地址计算公式
+    // 实际地址 = base_addr + (vaddr - vaddr_base)
+    uint64_t dynamic_addr = (uint64_t)base_addr + (dynamic_vaddr - vaddr_base);
+    printf("  Calculated dynamic address: 0x"); 
+    utoa_hex_simple((unsigned long)dynamic_addr, tmp_buf); printf(tmp_buf); 
+    printf(" (base_addr + dynamic_vaddr - vaddr_base)\n");
+    
+    dynamic = (Elf64_Dyn *)dynamic_addr;
+    
+    if (!dynamic) {
+        printf("Error: Dynamic segment not found\n");
+        munmap(base_addr, total_size);
+        free(phdr);
+        return NULL;
+    }
+    
+    // 获取动态段信息（使用无安全检查版本，因为库的动态段不在动态链接器地址空间内）
+    uint64_t strtab_addr = get_dynamic_tag_unsafe(dynamic, DT_STRTAB);
+    uint64_t symtab_addr = get_dynamic_tag_unsafe(dynamic, DT_SYMTAB);
+    uint64_t init_addr = get_dynamic_tag_unsafe(dynamic, DT_INIT);
+    uint64_t init_array_addr = get_dynamic_tag_unsafe(dynamic, DT_INIT_ARRAY);
+    uint64_t init_array_size = get_dynamic_tag_unsafe(dynamic, DT_INIT_ARRAYSZ);
+    
+    printf("Library dynamic info: strtab=0x%x, symtab=0x%x, init=0x%x, init_array=0x%x\n",$
+           (unsigned int)strtab_addr, (unsigned int)symtab_addr,$
+           (unsigned int)init_addr, (unsigned int)init_array_addr);
+    
+    // 计算字符串表和符号表的实际地址
+    const char *strtab = NULL;
+    Elf64_Sym *symtab = NULL;
+    
+    // 尝试从 hash 表获取符号数量，如果失败则使用默认值
+    uint32_t symnum = 1000;  // 默认值
+    uint64_t hash_addr = get_dynamic_tag_unsafe(dynamic, DT_HASH);
+    if (hash_addr) {
+        // Hash 表的第一个条目是 nbucket，第二个是 nchain
+        // nchain 就是符号数量
+        uint64_t hash_actual = actual_base + (hash_addr - first_load_vaddr);
+        uint32_t *hash_table = (uint32_t *)hash_actual;
+        if (hash_table && hash_table[1] > 0 && hash_table[1] < 10000) {
+            symnum = hash_table[1];  // nchain
+            printf("Library symbol count from hash table: %d\n", symnum);
+        }
+    }
+    
+    if (strtab_addr) {
+        uint64_t strtab_actual = actual_base + (strtab_addr - first_load_vaddr);
+        strtab = (const char *)strtab_actual;
+        printf("Library strtab: vaddr=0x%x, base=0x%x, first_load=0x%x, actual=0x%x\n",$
+               (unsigned int)strtab_addr, (unsigned int)actual_base,$
+               (unsigned int)first_load_vaddr, (unsigned int)strtab_actual);
+    }
+    
+    if (symtab_addr) {
+        uint64_t symtab_actual = actual_base + (symtab_addr - first_load_vaddr);
+        symtab = (Elf64_Sym *)symtab_actual;
+        printf("Library symtab: vaddr=0x%x, base=0x%x, first_load=0x%x, actual=0x%x\n",$
+               (unsigned int)symtab_addr, (unsigned int)actual_base,$
+               (unsigned int)first_load_vaddr, (unsigned int)symtab_actual);
+    }
+    
+    // 创建 LoadedLibrary 结构
+    LoadedLibrary *lib = malloc(sizeof(LoadedLibrary));
+    if (!lib) {
+        printf("Error: Failed to allocate memory for LoadedLibrary\n");
+        munmap(base_addr, total_size);
+        free(phdr);
+        return NULL;
+    }
+    
+    // 分配并复制 ELF 头（因为 ELF 头可能不在 LOAD 段中）
+    Elf64_Ehdr *ehdr_mem = malloc(sizeof(Elf64_Ehdr));
+    if (!ehdr_mem) {
+        printf("Error: Failed to allocate memory for ELF header\n");
+        munmap(base_addr, total_size);
+        free(phdr);
+        free(lib);
+        return NULL;
+    }
+    memcpy_simple(ehdr_mem, &ehdr, sizeof(Elf64_Ehdr));
+    
+    lib->path = strdup_simple(path);
+    lib->base_addr = actual_base;
+    lib->ehdr = ehdr_mem;
+    lib->phdr = phdr;
+    lib->dynamic = dynamic;
+    lib->strtab = strtab;
+    lib->symtab = symtab;
+    lib->symnum = symnum;
+    lib->init = init_addr ? (actual_base + (init_addr - first_load_vaddr)) : 0;
+    lib->init_array = init_array_addr ? (actual_base + (init_array_addr - first_load_vaddr)) : 0;
+    lib->init_array_size = init_array_size;
+    lib->next = NULL;
+    
+    // 添加到链表
+    if (!g_loaded_libraries) {
+        g_loaded_libraries = lib;
+    } else {
+        LoadedLibrary *last = g_loaded_libraries;
+        while (last->next) last = last->next;
+        last->next = lib;
+    }
+    
+    g_library_count++;
+    printf("Library %s loaded at 0x%x\n", path, (unsigned int)actual_base);
+    
+    return lib;
+}
+
+/**
+ * 递归加载依赖库
+ */
+static int load_dependencies(LoadedLibrary *lib)
+{
+    if (!lib || !lib->dynamic) {
+        return 0;
+    }
+    
+    // 获取字符串表
+    const char *strtab = lib->strtab;
+    if (!strtab) {
+        return 0;
+    }
+    
+    // 遍历 DT_NEEDED 条目
+    for (int i = 0; i < 1000; i++) {
+        if (lib->dynamic[i].d_tag == DT_NULL) break;
+        if (lib->dynamic[i].d_tag == DT_NEEDED) {
+            const char *libname = strtab + lib->dynamic[i].d_val;
+            
+            // 检查是否已加载
+            char *libpath = search_library(libname);
+            if (!libpath) {
+                printf("Warning: Failed to find library %s\n", libname);
+                continue;
+            }
+            
+            // 检查是否已经加载
+            if (find_loaded_library(libpath)) {
+                printf("Dependency %s already loaded\n", libname);
+                free(libpath);
+                continue;
+            }
+            
+            // 加载库
+            LoadedLibrary *dep = load_shared_library(libpath);
+            if (!dep) {
+                printf("Error: Failed to load dependency %s\n", libname);
+                free(libpath);
+                continue;
+            }
+            
+            // 递归加载依赖的依赖
+            if (load_dependencies(dep) != 0) {
+                printf("Error: Failed to load dependencies of %s\n", libname);
+                free(libpath);
+                return 1;
+            }
+            
+            free(libpath);
+        }
+    }
+    
+    return 0;
+}
+
+/**
+ * 添加符号到符号表
+ */
+static void add_symbol_to_table(const char *name, void *address, LoadedLibrary *library)
+{
+    if (!name || !address || !library) return;
+    
+    uint32_t hash = hash_string(name);
+    uint32_t bucket = hash % 256;
+    
+    SymbolEntry *entry = malloc(sizeof(SymbolEntry));
+    if (!entry) return;
+    
+    entry->name = name;  // 使用库的字符串表中的指针
+    entry->address = address;
+    entry->library = library;
+    entry->next = g_symbol_table[bucket];
+    g_symbol_table[bucket] = entry;
+}
+
+/**
+ * 构建库的符号表
+ */
+static void build_library_symbol_table(LoadedLibrary *lib)
+{
+    if (!lib || !lib->symtab || !lib->strtab) {
+        printf("Error: Invalid library for symbol table building\n");
+        return;
+    }
+    
+    printf("Building symbol table for %s: symtab=0x%x, strtab=0x%x, symnum=%d\n",$
+           lib->path ? lib->path : "unknown",$
+           (unsigned int)(uintptr_t)lib->symtab,$
+           (unsigned int)(uintptr_t)lib->strtab,$
+           lib->symnum);
+    
+    int symbol_count = 0;
+    // 限制遍历范围，避免访问无效内存
+    uint32_t max_sym = lib->symnum;
+    if (max_sym > 1000) max_sym = 1000;  // 限制最大符号数
+    
+    for (uint32_t i = 0; i < max_sym; i++) {
+        Elf64_Sym *sym = &lib->symtab[i];
+        
+        // 安全检查：如果遇到全零的符号表条目，可能已经到达末尾
+        if (sym->st_name == 0 && sym->st_value == 0 && sym->st_size == 0 && 
+            sym->st_info == 0 && sym->st_shndx == 0) {
+            // 可能是符号表末尾，但继续检查几个条目
+            int zero_count = 0;
+            for (int j = 0; j < 5 && (i + j) < max_sym; j++) {
+                if (lib->symtab[i + j].st_name == 0 && lib->symtab[i + j].st_value == 0) {
+                    zero_count++;
+                }
+            }
+            if (zero_count >= 3) {
+                printf("Reached end of symbol table at index %d\n", i);
+                break;
+            }
+        }
+        
+        // 只处理全局符号
+        if (ELF64_ST_BIND(sym->st_info) != STB_GLOBAL) continue;
+        if (sym->st_name == 0) continue;
+        
+        // 安全检查：确保 st_name 不会越界
+        if (sym->st_name > 0x100000) {
+            // 可能是无效数据，跳过
+            continue;
+        }
+        
+        const char *symname = lib->strtab + sym->st_name;
+        
+        // 安全检查：确保符号名指针有效
+        if ((uintptr_t)symname < (uintptr_t)lib->strtab || 
+            (uintptr_t)symname > (uintptr_t)lib->strtab + 0x100000) {
+            printf("Warning: Invalid symbol name pointer for symbol %d\n", i);
+            continue;
+        }
+        
+        // 计算符号地址
+        uint64_t sym_addr = 0;
+        if (lib->ehdr && lib->phdr) {
+            sym_addr = calculate_symbol_address(sym, lib->base_addr, lib->phdr, lib->ehdr->e_phnum);
+        }
+        
+        if (sym_addr == 0) {
+            // 回退方法
+            uint64_t first_load_vaddr = 0;
+            for (uint16_t j = 0; j < lib->ehdr->e_phnum; j++) {
+                if (lib->phdr[j].p_type == PT_LOAD) {
+                    first_load_vaddr = lib->phdr[j].p_vaddr;
+                    break;
+                }
+            }
+            sym_addr = lib->base_addr + sym->st_value - first_load_vaddr;
+        }
+        
+        if (symbol_count < 5) {
+            printf("  Symbol %d: %s, addr=0x%x\n", 
+                   symbol_count, symname, (unsigned int)sym_addr);
+        }
+        
+        add_symbol_to_table(symname, (void *)sym_addr, lib);
+        symbol_count++;
+    }
+    
+    printf("Added %d symbols to symbol table\n", symbol_count);
+}
+
+/**
+ * 解析符号
+ */
+static void *resolve_symbol(const char *name)
+{
+    if (!name) return NULL;
+    
+    uint32_t hash = hash_string(name);
+    uint32_t bucket = hash % 256;
+    
+    SymbolEntry *entry = g_symbol_table[bucket];
+    while (entry) {
+        if (entry->name && strncmp_simple(entry->name, name, 256) == 0) {
+            return entry->address;
+        }
+        entry = entry->next;
+    }
+    
+    return NULL;
+}
+
+/**
+ * 处理库的重定位（增强版，支持全局符号解析）
+ */
+static void process_library_relocation(Elf64_Rela *rela, LoadedLibrary *lib, uint64_t *got_addr)
+{
+    if (!rela || !lib) {
+        return;
+    }
+    
+    uint32_t type = ELF64_R_TYPE(rela->r_info);
+    uint64_t sym = ELF64_R_SYM(rela->r_info);
+    uint64_t offset = rela->r_offset;
+    
+    // 计算第一个 LOAD 段的虚拟地址
+    uint64_t first_load_vaddr = 0;
+    for (uint16_t i = 0; i < lib->ehdr->e_phnum; i++) {
+        if (lib->phdr[i].p_type == PT_LOAD) {
+            first_load_vaddr = lib->phdr[i].p_vaddr;
+            break;
+        }
+    }
+    
+    // 计算目标地址
+    uint64_t target_addr = calculate_address_from_vaddr(offset, lib->base_addr, lib->phdr, lib->ehdr->e_phnum);
+    if (target_addr == 0) {
+        target_addr = lib->base_addr + offset - first_load_vaddr;
+    }
+    uint64_t *addr = (uint64_t *)target_addr;
+    
+    switch (type) {
+        case 3:  // R_AARCH64_RELATIVE
+            *addr = lib->base_addr + rela->r_addend;
+            break;
+            
+        case 1:  // R_AARCH64_ABS64 / R_AARCH64_GLOB_DAT
+        case 2:  // R_AARCH64_JUMP_SLOT
+        {
+            uint64_t sym_addr = 0;
+            
+            // 首先尝试从本地符号表解析
+            if (sym < lib->symnum && lib->symtab && lib->strtab) {
+                Elf64_Sym *sym_entry = &lib->symtab[sym];
+                if (sym_entry->st_name > 0) {
+                    const char *symname = lib->strtab + sym_entry->st_name;
+                    
+                    // 对于关键符号（vsprintf），添加详细调试
+                    int is_vsprintf = (symname && strncmp(symname, "vsprintf", 8) == 0);
+                    if (is_vsprintf) {
+                        printf("  Processing vsprintf relocation in %s:\n", lib->path ? lib->path : "unknown");
+                        printf("    sym_entry->st_value = 0x%llx\n", (unsigned long long)sym_entry->st_value);
+                        printf("    lib->base_addr = 0x%x\n", (unsigned int)(uintptr_t)lib->base_addr);
+                        printf("    first_load_vaddr = 0x%llx\n", (unsigned long long)first_load_vaddr);
+                    }
+                    
+                    // 计算符号地址
+                    sym_addr = calculate_symbol_address(sym_entry, lib->base_addr, lib->phdr, lib->ehdr->e_phnum);
+                    if (is_vsprintf) {
+                        printf("    calculate_symbol_address result: 0x%llx\n", (unsigned long long)sym_addr);
+                    }
+                    
+                    if (sym_addr == 0) {
+                        sym_addr = lib->base_addr + sym_entry->st_value - first_load_vaddr;
+                        if (is_vsprintf) {
+                            printf("    Fallback calculation: 0x%llx\n", (unsigned long long)sym_addr);
+                            printf("      = 0x%x + 0x%llx - 0x%llx\n",$
+                                   (unsigned int)(uintptr_t)lib->base_addr,$
+                                   (unsigned long long)sym_entry->st_value,$
+                                   (unsigned long long)first_load_vaddr);
+                        }
+                    }
+                    
+                    // 验证符号地址是否正确（仅用于调试）
+                    if (is_vsprintf && sym_addr != 0) {
+                        uint32_t *code = (uint32_t *)sym_addr;
+                        printf("    vsprintf address: 0x%llx, code[0] = 0x%x\n",$
+                               (unsigned long long)sym_addr, code[0]);
+                    }
+                }
+            }
+            
+            // 如果本地符号表找不到，尝试全局符号表
+            if (sym_addr == 0 && lib->strtab && sym < lib->symnum && lib->symtab) {
+                Elf64_Sym *sym_entry = &lib->symtab[sym];
+                if (sym_entry->st_name > 0) {
+                    const char *symname = lib->strtab + sym_entry->st_name;
+                    void *global_addr = resolve_symbol(symname);
+                    if (global_addr) {
+                        sym_addr = (uint64_t)global_addr;
+                    }
+                }
+            }
+            
+            if (sym_addr != 0) {
+                *addr = sym_addr + rela->r_addend;
+            } else {
+                printf("Warning: Failed to resolve symbol for relocation at 0x%x\n", 
+                       (unsigned int)target_addr);
+            }
+            break;
+        }
+        
+        case 0:  // R_AARCH64_NONE
+            break;
+            
+        default:
+            printf("Warning: Unknown relocation type %d, treating as relative\n", type);
+            *addr = lib->base_addr + rela->r_addend;
+            break;
+    }
+}
+
+/**
+ * 处理库的重定位
+ */
+static int process_library_relocations(LoadedLibrary *lib)
+{
+    if (!lib || !lib->dynamic) {
+        return 0;
+    }
+    
+    // 对于库的动态段，使用 get_dynamic_tag_unsafe（因为库不在动态链接器地址空间内）
+    uint64_t rela_addr = get_dynamic_tag_unsafe(lib->dynamic, DT_RELA);
+    uint64_t rela_size = get_dynamic_tag_unsafe(lib->dynamic, DT_RELASZ);
+    uint64_t rela_ent = get_dynamic_tag_unsafe(lib->dynamic, DT_RELAENT);
+    uint64_t pltrel_addr = get_dynamic_tag_unsafe(lib->dynamic, DT_JMPREL);
+    uint64_t pltrel_size = get_dynamic_tag_unsafe(lib->dynamic, DT_PLTRELSZ);
+    uint64_t got_addr = get_dynamic_tag_unsafe(lib->dynamic, DT_PLTGOT);
+    
+    // 检查是否是 libmini_libc.so，添加调试信息
+    int is_mini_libc_debug = 0;
+    if (lib->path) {
+        const char *p = lib->path;
+        while (*p) {
+            if (*p == 'l' && p[1] == 'i' && p[2] == 'b' && 
+                p[3] == 'm' && p[4] == 'i' && p[5] == 'n' &&
+                p[6] == 'i' && p[7] == '_' && p[8] == 'l' &&
+                p[9] == 'i' && p[10] == 'b' && p[11] == 'c') {
+                is_mini_libc_debug = 1;
+                break;
+            }
+            p++;
+        }
+    }
+    
+    if (is_mini_libc_debug) {
+        printf("libmini_libc.so dynamic tags:\n");
+        printf("  lib->dynamic pointer: 0x%x\n", (unsigned int)(uintptr_t)lib->dynamic);
+        printf("  lib->base_addr: 0x%x\n", (unsigned int)(uintptr_t)lib->base_addr);
+        char hex_buf[32];
+        printf("  Using: DT_JMPREL=0x"); utoa_hex_simple((unsigned long)pltrel_addr, hex_buf); printf(hex_buf);
+        printf(", DT_PLTRELSZ=0x"); utoa_hex_simple((unsigned long)pltrel_size, hex_buf); printf(hex_buf);
+        printf("\n");
+    }
+    
+    // 计算第一个 LOAD 段的虚拟地址
+    uint64_t first_load_vaddr = 0;
+    for (uint16_t i = 0; i < lib->ehdr->e_phnum; i++) {
+        if (lib->phdr[i].p_type == PT_LOAD) {
+            first_load_vaddr = lib->phdr[i].p_vaddr;
+            break;
+        }
+    }
+    
+    // 处理普通重定位表
+    if (rela_addr && rela_size && rela_ent) {
+        uint32_t rela_count = rela_size / rela_ent;
+        uint64_t rela_actual = lib->base_addr + (rela_addr - first_load_vaddr);
+        Elf64_Rela *rela = (Elf64_Rela *)rela_actual;
+        
+        for (uint32_t i = 0; i < rela_count; i++) {
+            process_library_relocation(&rela[i], lib, (uint64_t *)got_addr);
+        }
+    }
+    
+    // 处理 PLT 重定位表
+    if (pltrel_addr && pltrel_size && rela_ent) {
+        uint32_t pltrel_count = pltrel_size / rela_ent;
+        
+        // 计算 PLT 重定位表的实际地址
+        // 使用 calculate_address_from_vaddr 来正确计算
+        uint64_t pltrel_actual = calculate_address_from_vaddr(
+            pltrel_addr, lib->base_addr, lib->phdr, lib->ehdr->e_phnum);
+        
+        // 如果 calculate_address_from_vaddr 失败，使用回退方法
+        if (pltrel_actual == 0) {
+            pltrel_actual = lib->base_addr + (pltrel_addr - first_load_vaddr);
+        }
+        
+        Elf64_Rela *pltrel = (Elf64_Rela *)pltrel_actual;
+        
+        // 检查是否是 libmini_libc.so
+        int is_mini_libc = 0;
+        if (lib->path) {
+            const char *p = lib->path;
+            while (*p) {
+                if (*p == 'l' && p[1] == 'i' && p[2] == 'b' && 
+                    p[3] == 'm' && p[4] == 'i' && p[5] == 'n' &&
+                    p[6] == 'i' && p[7] == '_' && p[8] == 'l' &&
+                    p[9] == 'i' && p[10] == 'b' && p[11] == 'c') {
+                    is_mini_libc = 1;
+                    break;
+                }
+                p++;
+            }
+        }
+        
+        if (is_mini_libc) {
+            printf("Processing %d PLT relocations for libmini_libc.so\n", pltrel_count);
+            printf("  pltrel_addr (vaddr) = 0x%llx\n", (unsigned long long)pltrel_addr);
+            printf("  first_load_vaddr = 0x%llx\n", (unsigned long long)first_load_vaddr);
+            printf("  lib->base_addr = 0x%x\n", (unsigned int)(uintptr_t)lib->base_addr);
+            printf("  pltrel_actual = 0x%llx\n", (unsigned long long)pltrel_actual);
+            
+            // 验证重定位表地址是否可读
+            printf("  Verifying pltrel table is readable...\n");
+            volatile uint64_t test_read = pltrel[0].r_offset;
+            printf("  pltrel[0].r_offset = 0x%llx\n", (unsigned long long)test_read);
+            
+            // 如果读取失败，尝试使用 calculate_address_from_vaddr
+            if (test_read == 0 || test_read == 0xFFFFFFFFFFFFFFFFULL) {
+                printf("  WARNING: Direct read failed, trying calculate_address_from_vaddr...\n");
+                uint64_t pltrel_calculated = calculate_address_from_vaddr(
+                    pltrel_addr, lib->base_addr, lib->phdr, lib->ehdr->e_phnum);
+                if (pltrel_calculated != 0 && pltrel_calculated != pltrel_actual) {
+                    printf("  Calculated address: 0x%llx (different from pltrel_actual)\n",$
+                           (unsigned long long)pltrel_calculated);
+                    pltrel = (Elf64_Rela *)pltrel_calculated;
+                    pltrel_actual = pltrel_calculated;
+                    printf("  Using calculated address instead\n");
+                }
+            }
+        }
+        
+        for (uint32_t i = 0; i < pltrel_count; i++) {
+            // 直接读取（不使用 volatile，因为地址已经计算正确）
+            uint64_t r_offset_val = pltrel[i].r_offset;
+            uint64_t r_info_val = pltrel[i].r_info;
+            int64_t r_addend_val = pltrel[i].r_addend;
+            
+            uint32_t type = ELF64_R_TYPE(r_info_val);
+            uint64_t sym_idx = ELF64_R_SYM(r_info_val);
+            
+            // 对于 libmini_libc.so，打印所有重定位的详细信息
+            if (is_mini_libc) {
+                printf("  PLT[%d]: r_offset=0x%llx, r_info=0x%llx, r_addend=0x%llx, type=%d, sym=%llu\n",$
+                       i, (unsigned long long)r_offset_val,$
+                       (unsigned long long)r_info_val,$
+                       (unsigned long long)r_addend_val,$
+                       (unsigned int)type, (unsigned long long)sym_idx);
+                
+                // 检查是否是 vsprintf
+                if (sym_idx < lib->symnum && lib->symtab && lib->strtab) {
+                    Elf64_Sym *sym_entry = &lib->symtab[sym_idx];
+                    if (sym_entry->st_name > 0 && sym_entry->st_name < 0x100000) {
+                        const char *symname = lib->strtab + sym_entry->st_name;
+                        if (symname && strncmp(symname, "vsprintf", 8) == 0) {
+                            printf("    *** Found vsprintf relocation! ***\n");
+                            printf("    sym_index=%llu, st_value=0x%llx, r_offset=0x%llx\n",$
+                                   (unsigned long long)sym_idx,$
+                                   (unsigned long long)sym_entry->st_value,$
+                                   (unsigned long long)r_offset_val);
+                        }
+                    }
+                }
+            }
+            
+            // 创建临时重定位条目用于处理
+            Elf64_Rela temp_rela;
+            temp_rela.r_offset = r_offset_val;
+            temp_rela.r_info = r_info_val;
+            temp_rela.r_addend = r_addend_val;
+            
+            process_library_relocation(&temp_rela, lib, (uint64_t *)got_addr);
+        }
+        
+        if (is_mini_libc) {
+            printf("Completed PLT relocations for libmini_libc.so\n");
+        }
+    }
+    
+    return 0;
+}
+
+/**
+ * 调用初始化函数
+ */
+static void call_init_functions(LoadedLibrary *lib)
+{
+    if (!lib) return;
+    
+    // 调用 DT_INIT
+    if (lib->init) {
+        void (*init_func)(void) = (void (*)(void))lib->init;
+        printf("Calling init function for %s at 0x%x\n", 
+               lib->path ? lib->path : "unknown", (unsigned int)lib->init);
+        init_func();
+    }
+    
+    // 调用 DT_INIT_ARRAY
+    if (lib->init_array && lib->init_array_size > 0) {
+        uint64_t *init_array = (uint64_t *)lib->init_array;
+        int count = lib->init_array_size / sizeof(uint64_t);
+        
+        for (int i = 0; i < count; i++) {
+            if (init_array[i]) {
+                void (*init_func)(void) = (void (*)(void))init_array[i];
+                printf("Calling init_array[%d] for %s at 0x%x\n",$
+                       i, lib->path ? lib->path : "unknown", 
+                       (unsigned int)init_array[i]);
+                init_func();
+            }
+        }
+    }
+}
+
+/**
+ * 处理可执行文件的重定位
+ */
+static int process_executable_relocations(void)
+{
+    if (!g_auxv_phdr || !g_auxv_phnum) {
+        return 0;  // 没有程序头表，可能不是动态链接的可执行文件
+    }
+    
+    Elf64_Phdr *phdr = (Elf64_Phdr *)g_auxv_phdr;
+    Elf64_Dyn *dynamic = NULL;
+    
+    // 查找动态段
+    for (uint16_t i = 0; i < g_auxv_phnum; i++) {
+        if (phdr[i].p_type == PT_DYNAMIC) {
+            dynamic = (Elf64_Dyn *)phdr[i].p_vaddr;
+            break;
+        }
+    }
+    
+    if (!dynamic) {
+        return 0;  // 没有动态段，可能是静态链接
+    }
+    
+    // 获取重定位表信息
+    uint64_t rela_addr = get_dynamic_tag_unsafe(dynamic, DT_RELA);
+    uint64_t rela_size = get_dynamic_tag_unsafe(dynamic, DT_RELASZ);
+    uint64_t rela_ent = get_dynamic_tag_unsafe(dynamic, DT_RELAENT);
+    uint64_t pltrel_addr = get_dynamic_tag_unsafe(dynamic, DT_JMPREL);
+    uint64_t pltrel_size = get_dynamic_tag_unsafe(dynamic, DT_PLTRELSZ);
+    uint64_t got_addr = get_dynamic_tag_unsafe(dynamic, DT_PLTGOT);
+    
+    // 如果 rela_ent 为 0，使用默认值（Elf64_Rela 的大小）
+    if (rela_ent == 0) {
+        rela_ent = sizeof(Elf64_Rela);
+    }
+    
+    // 获取字符串表和符号表（用于符号解析）
+    uint64_t strtab_vaddr = get_dynamic_tag_unsafe(dynamic, DT_STRTAB);
+    uint64_t symtab_vaddr = get_dynamic_tag_unsafe(dynamic, DT_SYMTAB);
+    
+    // 计算第一个 LOAD 段的虚拟地址
+    uint64_t first_load_vaddr = 0;
+    uint64_t first_load_paddr = 0;
+    for (uint16_t i = 0; i < g_auxv_phnum; i++) {
+        if (phdr[i].p_type == PT_LOAD) {
+            first_load_vaddr = phdr[i].p_vaddr;
+            first_load_paddr = (uint64_t)phdr[i].p_vaddr;  // 对于可执行文件，p_vaddr 是实际地址
+            break;
+        }
+    }
+    
+    const char *strtab = NULL;
+    Elf64_Sym *symtab = NULL;
+    uint32_t symnum = 1000;  // 默认值
+    
+    if (strtab_vaddr && first_load_vaddr != 0) {
+        uint64_t strtab_addr = first_load_paddr + (strtab_vaddr - first_load_vaddr);
+        strtab = (const char *)strtab_addr;
+    }
+    
+    if (symtab_vaddr && first_load_vaddr != 0) {
+        uint64_t symtab_addr = first_load_paddr + (symtab_vaddr - first_load_vaddr);
+        symtab = (Elf64_Sym *)symtab_addr;
+    }
+    
+    printf("Processing executable relocations: rela=0x%x, rela_size=0x%x, rela_ent=0x%x\n",$
+           (unsigned int)rela_addr, (unsigned int)rela_size, (unsigned int)rela_ent);
+    printf("  pltrel=0x%x, pltrel_size=0x%x, got=0x%x\n",$
+           (unsigned int)pltrel_addr, (unsigned int)pltrel_size, (unsigned int)got_addr);
+    
+    // 处理普通重定位表
+    if (rela_addr && rela_size && rela_ent) {
+        uint32_t rela_count = rela_size / rela_ent;
+        uint64_t rela_addr_actual = first_load_paddr + (rela_addr - first_load_vaddr);
+        Elf64_Rela *rela = (Elf64_Rela *)rela_addr_actual;
+        
+        for (uint32_t i = 0; i < rela_count; i++) {
+            // 使用全局符号解析来处理可执行文件的重定位
+            uint32_t type = ELF64_R_TYPE(rela[i].r_info);
+            uint64_t sym = ELF64_R_SYM(rela[i].r_info);
+            uint64_t offset = rela[i].r_offset;
+            
+            // 计算目标地址
+            uint64_t target_addr = first_load_paddr + (offset - first_load_vaddr);
+            uint64_t *addr = (uint64_t *)target_addr;
+            
+            switch (type) {
+                case 3:  // R_AARCH64_RELATIVE
+                    *addr = first_load_paddr + rela[i].r_addend;
+                    break;
+                    
+                case 1:  // R_AARCH64_ABS64 / R_AARCH64_GLOB_DAT
+                case 2:  // R_AARCH64_JUMP_SLOT
+                {
+                    uint64_t sym_addr = 0;
+                    
+                    // 尝试从可执行文件的符号表解析
+                    if (sym < symnum && symtab && strtab) {
+                        Elf64_Sym *sym_entry = &symtab[sym];
+                        if (sym_entry->st_name > 0 && sym_entry->st_name < 0x100000) {
+                            const char *symname = strtab + sym_entry->st_name;
+                            void *global_addr = resolve_symbol(symname);
+                            if (global_addr) {
+                                sym_addr = (uint64_t)global_addr;
+                            }
+                        }
+                    }
+                    
+                    if (sym_addr != 0) {
+                        *addr = sym_addr + rela[i].r_addend;
+                    } else {
+                        printf("Warning: Failed to resolve symbol for executable relocation at 0x%x\n",$
+                               (unsigned int)target_addr);
+                    }
+                    break;
+                }
+                
+                default:
+                    break;
+            }
+        }
+    }
+    
+    // 处理 PLT 重定位表
+    if (pltrel_addr && pltrel_size && rela_ent) {
+        uint32_t pltrel_count = pltrel_size / rela_ent;
+        uint64_t pltrel_addr_actual = first_load_paddr + (pltrel_addr - first_load_vaddr);
+        
+        printf("PLT reloc: vaddr=0x%x, first_load_vaddr=0x%x, first_load_paddr=0x%x, actual=0x%x\n",$
+               (unsigned int)pltrel_addr, (unsigned int)first_load_vaddr,$
+               (unsigned int)first_load_paddr, (unsigned int)pltrel_addr_actual);
+        
+        // 对于可执行文件（ET_EXEC），p_vaddr 就是实际地址
+        // 所以 pltrel_addr 应该可以直接使用
+        Elf64_Rela *pltrel = (Elf64_Rela *)pltrel_addr;
+        
+        printf("Using pltrel_addr directly: 0x%x (for executable, p_vaddr is actual address)\n",$
+               (unsigned int)pltrel_addr);
+        
+        // 验证地址有效性（可执行文件的地址范围）
+        if ((uintptr_t)pltrel < 0x400000 || (uintptr_t)pltrel > 0x500000) {
+            printf("Warning: PLT reloc table address seems out of range: 0x%x\n",$
+                   (unsigned int)(uintptr_t)pltrel);
+            // 尝试使用计算后的地址
+            pltrel = (Elf64_Rela *)pltrel_addr_actual;
+            printf("Trying calculated address: 0x%x\n", (unsigned int)pltrel_addr_actual);
+        }
+        
+        // 读取第一个条目验证数据
+        if (pltrel_count > 0) {
+            volatile Elf64_Rela test_entry = pltrel[0];
+            printf("First PLT entry verification: r_offset=0x%x, r_info=0x%x, r_addend=0x%x\n",$
+                   (unsigned int)test_entry.r_offset,$
+                   (unsigned int)test_entry.r_info,$
+                   (unsigned int)test_entry.r_addend);
+        }
+        
+        printf("Processing %d PLT relocations at 0x%x\n",$
+               pltrel_count, (unsigned int)pltrel_addr_actual);
+        printf("PLT reloc table: first entry at 0x%x, size=%d bytes\n",$
+               (unsigned int)pltrel_addr_actual, (int)(pltrel_count * sizeof(Elf64_Rela)));
+        
+        // 验证地址有效性
+        if ((uintptr_t)pltrel < first_load_paddr || 
+            (uintptr_t)pltrel > first_load_paddr + 0x100000) {
+            printf("Error: PLT reloc table address out of range\n");
+            return 1;
+        }
+        
+        for (uint32_t i = 0; i < pltrel_count; i++) {
+            // 读取原始数据（使用 volatile 避免优化）
+            volatile Elf64_Rela *rela_ptr = &pltrel[i];
+            volatile uint32_t r_info_raw = rela_ptr->r_info;
+            volatile uint64_t r_offset_raw = rela_ptr->r_offset;
+            volatile int64_t r_addend_raw = rela_ptr->r_addend;
+            
+            if (i < 10) {
+                printf("  PLT[%d] raw: r_info=0x%x, r_offset=0x%x, r_addend=0x%x\n",$
+                       i, (unsigned int)r_info_raw,$
+                       (unsigned int)r_offset_raw,$
+                       (unsigned int)r_addend_raw);
+            }
+            uint32_t type = ELF64_R_TYPE(r_info_raw);
+            uint64_t sym = ELF64_R_SYM(r_info_raw);
+            uint64_t offset = r_offset_raw;
+            int64_t addend = r_addend_raw;
+            
+            // 对于 PLT 重定位，符号索引可能不存储在 r_info 中
+            // 根据 readelf 输出，PLT 条目按顺序对应符号索引 1, 2, 3...
+            // 符号表索引 0 是 STN_UNDEF，所以第一个 PLT 条目对应索引 1
+            // 如果 r_info 中的符号索引都是 4（可能是占位符），使用条目索引 + 1
+            if (sym == 4) {
+                // 使用条目索引 + 1 作为符号索引（因为符号表索引 0 是 STN_UNDEF）
+                sym = i + 1;
+                if (i < 10) {
+                    printf("    Using entry index %d + 1 = %d as symbol index\n", i, (int)sym);
+                }
+            }
+            
+            if (i < 10) {
+                printf("    extracted: type=%d, sym=%d, addend=%d\n", 
+                       type, (int)sym, (int)addend);
+            }
+            
+            uint64_t target_addr = first_load_paddr + (offset - first_load_vaddr);
+            uint64_t *addr = (uint64_t *)target_addr;
+            
+            if (i < 10) {
+                printf("  PLT[%d]: r_offset=0x%x, target_addr=0x%x, old_value=0x%x\n",$
+                       i, (unsigned int)offset, (unsigned int)target_addr,$
+                       (unsigned int)(*addr));
+            }
+            
+            if (type == 2) {  // R_AARCH64_JUMP_SLOT
+                uint64_t sym_addr = 0;
+                
+                if (sym < symnum && symtab && strtab) {
+                    Elf64_Sym *sym_entry = &symtab[sym];
+                    if (i < 10) {
+                        printf("  PLT[%d]: sym_index=%d, st_name=0x%x, st_value=0x%x\n",$
+                               i, (int)sym, (unsigned int)sym_entry->st_name,$
+                               (unsigned int)sym_entry->st_value);
+                    }
+                    if (sym_entry->st_name > 0 && sym_entry->st_name < 0x100000) {
+                        const char *symname = strtab + sym_entry->st_name;
+                        if (i < 10) {
+                            printf("    symname=%s\n", symname);
+                        }
+                        void *global_addr = resolve_symbol(symname);
+                        if (global_addr) {
+                            sym_addr = (uint64_t)global_addr;
+                            
+                            // 对于关键符号（vsprintf, printf），验证地址是否正确
+                            int is_critical = (symname && 
+                                               (strncmp(symname, "vsprintf", 8) == 0 || 
+                                                strncmp(symname, "printf", 6) == 0));
+                            
+                            if (i < 10 || is_critical) {
+                                printf("    -> resolved %s to 0x%x\n", symname, (unsigned int)sym_addr);
+                                
+                                // 验证 vsprintf 地址（仅用于调试）
+                                if (strncmp(symname, "vsprintf", 8) == 0) {
+                                    uint32_t *code = (uint32_t *)sym_addr;
+                                    printf("      vsprintf[0] = 0x%x (expected: 0xa9b67bfd)\n", code[0]);
+                                }
+                            }
+                        } else {
+                            if (i < 10 || (symname && (strncmp(symname, "vsprintf", 8) == 0 || 
+                                                       strncmp(symname, "printf", 6) == 0))) {
+                                printf("    -> %s not found in symbol table\n", symname);
+                            }
+                        }
+                    }
+                } else {
+                    if (i < 10) {
+                        printf("  PLT[%d]: invalid sym_index=%d (symnum=%d, symtab=0x%x, strtab=0x%x)\n",$
+                               i, (int)sym, symnum, 
+                               (unsigned int)(uintptr_t)symtab, 
+                               (unsigned int)(uintptr_t)strtab);
+                    }
+                }
+                
+                if (sym_addr != 0) {
+                    *addr = sym_addr + pltrel[i].r_addend;
+                    if (i < 10) {
+                        printf("    -> GOT[%d] set to 0x%x\n", i, (unsigned int)(*addr));
+                    }
+                } else {
+                    printf("Warning: Failed to resolve PLT symbol %d at 0x%x\n",$
+                           i, (unsigned int)target_addr);
+                }
+            }
+        }
+        printf("Executable PLT relocations processed\n");
+    }
+    
+    return 0;
+}
+
+/**
+ * 主加载流程
+ */
+static int load_all_libraries(void)
+{
+    printf("\n=== Loading Dynamic Libraries ===\n");
+    
+    // 解析可执行文件的动态段
+    char **needed_libs = NULL;
+    int needed_count = 0;
+    
+    if (parse_executable_dynamic(&needed_libs, &needed_count) != 0) {
+        printf("Error: Failed to parse executable dynamic segment\n");
+        return 1;
+    }
+    
+    if (needed_count == 0) {
+        printf("No dynamic libraries needed\n");
+        return 0;
+    }
+    
+    printf("Found %d needed libraries\n", needed_count);
+    
+    // 加载所有依赖库
+    for (int i = 0; i < needed_count; i++) {
+        char *libpath = search_library(needed_libs[i]);
+        if (!libpath) {
+            printf("Error: Failed to find library %s\n", needed_libs[i]);
+            continue;
+        }
+        
+        // 检查是否已加载
+        if (find_loaded_library(libpath)) {
+            printf("Library %s already loaded\n", needed_libs[i]);
+            free(libpath);
+            continue;
+        }
+        
+        // 加载库
+        LoadedLibrary *lib = load_shared_library(libpath);
+        if (!lib) {
+            printf("Error: Failed to load library %s\n", needed_libs[i]);
+            free(libpath);
+            continue;
+        }
+        
+        // 递归加载依赖
+        if (load_dependencies(lib) != 0) {
+            printf("Error: Failed to load dependencies of %s\n", needed_libs[i]);
+            free(libpath);
+            continue;
+        }
+        
+        free(libpath);
+    }
+    
+    // 清理 needed_libs
+    for (int i = 0; i < needed_count; i++) {
+        free(needed_libs[i]);
+    }
+    free(needed_libs);
+    
+    // 构建所有库的符号表
+    printf("\n=== Building Symbol Tables ===\n");
+    LoadedLibrary *lib = g_loaded_libraries;
+    while (lib) {
+        build_library_symbol_table(lib);
+        lib = lib->next;
+    }
+    
+    // 处理所有库的重定位
+    printf("\n=== Processing Relocations ===\n");
+    lib = g_loaded_libraries;
+    while (lib) {
+        if (process_library_relocations(lib) != 0) {
+            printf("Error: Failed to process relocations for %s\n", 
+                   lib->path ? lib->path : "unknown");
+        }
+        lib = lib->next;
+    }
+    
+    // 处理可执行文件的重定位
+    printf("\n=== Processing Executable Relocations ===\n");
+    if (process_executable_relocations() != 0) {
+        printf("Error: Failed to process executable relocations\n");
+    }
+    
+    // 调用所有库的初始化函数
+    printf("\n=== Calling Init Functions ===\n");
+    lib = g_loaded_libraries;
+    while (lib) {
+        call_init_functions(lib);
+        lib = lib->next;
+    }
+    
+    printf("All libraries loaded successfully!\n");
+    return 0;
+}
+
+__attribute__((visibility("hidden")))
+int main(void *stack_pointer)
+{
+    // 立即保存 stack_pointer 的值到全局变量（因为后续可能会修改栈指针）
+    g_original_stack_pointer = (uintptr_t)stack_pointer;
+    
+    // 立即读取并保存栈上的关键数据（在动态链接器执行过程中，用户栈可能被破坏）
+    // 入口点期望从栈读取：argc 在 [sp]，argv 在 [sp+8]
+    uint64_t *user_stack = (uint64_t *)stack_pointer;
+    g_saved_user_argc = user_stack[0];
+    g_saved_user_argv0 = user_stack[1];
+    
+    int argc;
+    char **argv;
+    char **envp;
+    uint64_t *auxv;
+    
+    // 从栈指针解析所有参数
+    parse_stack(stack_pointer, &argc, &argv, &envp, &auxv);
+    
+    // 保存环境变量指针
+    g_environ = envp;
+    
+    // 使用 printf_simple 进行初始化阶段的打印
+    printf_simple("=== Dynamic Linker Starting ===\n");
+    printf_simple("argc: %d\n", argc);
+    
+    // 解析辅助向量 (auxv)
+    parse_auxv(auxv);
+    
+    // 解析环境变量
+    printf_simple("\nParsing environment variables...\n");
+    print_all_env();
+    
+    // 解析重要的环境变量
+    char *ld_library_path = get_env("LD_LIBRARY_PATH");
+    if (ld_library_path) 
+    {
+        printf_simple("LD_LIBRARY_PATH=%s\n", ld_library_path);
+    } else 
+    {
+        printf_simple("LD_LIBRARY_PATH not set\n");
+    }
+    
+    char *ld_preload = get_env("LD_PRELOAD");
+    if (ld_preload) 
+    {
+        printf_simple("LD_PRELOAD=%s\n", ld_preload);
+    }
+    
+    char *path = get_env("PATH");
+    if (path) 
+    {
+        printf_simple("PATH=%s\n", path);
+    }
+    
+    printf_simple("\nDynamic Linker initialization complete.\n");
+    
+    // 自举动态链接器
+    printf_simple("\n=== Bootstrap Dynamic Linker ===\n");
+    if (bootstrap_self())
+    {
+        printf_simple("Bootstrap failed!\n");
+        return 1;
+    }
+    printf_simple("Bootstrap completed successfully!\n");
+    
+    // 自举完成后，可以使用mini_lib的printf函数
+    printf("\n=== Testing mini_lib printf ===\n");
+    printf("This message is printed using mini_lib's printf function!\n");
+    printf("Bootstrap verification: SUCCESS\n");
+    printf("Dynamic linker base: 0x%x\n", (unsigned int)g_auxv_base);
+    
+    // 加载所有动态库
+    if (load_all_libraries()) {
+        printf("Failed to load libraries!\n");
+        return 1;
+    }
+    
+    // 跳转到可执行文件入口点
+    printf("\n=== Jumping to Executable Entry ===\n");
+    printf("Entry point: 0x%x\n", (unsigned int)g_auxv_entry);
+    printf("argc: %d, argv: 0x%x\n", argc, (unsigned int)(uintptr_t)argv);
+    printf("Stack pointer: 0x%x\n", (unsigned int)g_original_stack_pointer);
+    
+    // 验证入口点地址是否有效
+    if (g_auxv_entry < 0x400000 || g_auxv_entry > 0x500000) {
+        printf("Error: Invalid entry point address: 0x%x\n", (unsigned int)g_auxv_entry);
+        return 1;
+    }
+    
+    // 可执行文件的入口点 (_mini_libc_entry) 期望从栈读取 argc 和 argv
+    // 原始栈指针应该已经包含了正确的数据
+    printf("All relocations completed. Transferring control to executable...\n");
+    
+    // 恢复栈指针并跳转到入口点
+    asm volatile(
+        "mov sp, %0\n"           // 恢复用户栈指针
+        "mov x29, xzr\n"         // 清除帧指针
+        "mov x30, xzr\n"         // 清除链接寄存器
+        "br %1\n"                // 跳转到入口点
+        :
+        : "r"(g_original_stack_pointer), "r"(g_auxv_entry)
+        : "x29", "x30", "memory"
+    );
+    
+    // 不应该到达这里
+    printf("Error: Returned from entry point!\n");
+    __builtin_unreachable();
+}

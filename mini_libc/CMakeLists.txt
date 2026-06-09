@@ -1,7 +1,10 @@
 cmake_minimum_required(VERSION 2.8)
 project(mini_libc)
 
-# 设置汇编
+# 生成 compile_commands.json，供 IDE/Clangd 等使用
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# 让编译器支持汇编语言
 enable_language(ASM)
 set(CMAKE_ASM_COMPILER aarch64-none-linux-gnu-gcc)
 
@@ -38,50 +41,39 @@ set(MINI_LIBC_SRC
 set(TEST_MINI_LIBC test/test_mini_lib.c)
 
 # 设置编译选项
-add_compile_options(-std=gnu99 -g -fno-builtin-strlen -fno-builtin-malloc -fno-builtin-printf)
+add_compile_options(-std=gnu99 -g -O0 -fno-builtin-strlen -fno-builtin-malloc -fno-builtin-printf)
 
 # 设置通用链接选项（不包含-static）
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -nostdlib -e _mini_libc_entry -no-pie")
 
 # 设置需要生成的静态库和静态链接的可执行文件
-ADD_LIBRARY(mini_libc STATIC ${MINI_LIBC_SRC})
+add_library(mini_libc STATIC ${MINI_LIBC_SRC})
 add_executable(test_mini_libc ${TEST_MINI_LIBC})
 target_link_libraries(test_mini_libc mini_libc)
 set_target_properties(test_mini_libc PROPERTIES
     LINK_FLAGS "-static")
-
-
-# 添加动态链接器共享库（作为解释器，由内核调用）
-add_library(dynamic_linker_shared SHARED src/dynamic_linker.c src/dynamic_entry.S)
-set_target_properties(dynamic_linker_shared PROPERTIES
-    OUTPUT_NAME "dynamic_linker"
-    POSITION_INDEPENDENT_CODE ON
-    LINK_FLAGS "-nostdlib -Wl,-e,_start -Wl,-Bsymbolic -Wl,-z,now"
-    COMPILE_FLAGS "-fno-plt -fPIC"
-)
-target_link_libraries(dynamic_linker_shared mini_libc)
 
 # 添加动态库版本的mini_libc
 add_library(mini_libc_shared SHARED ${MINI_LIBC_SRC})
 set_target_properties(mini_libc_shared PROPERTIES 
     OUTPUT_NAME "mini_libc"
     POSITION_INDEPENDENT_CODE ON
-    LINK_FLAGS "-nostdlib -shared -Wl,-export-dynamic")
+    LINK_FLAGS "-shared -fPIC")
+
 
 # 添加动态链接版本的test_mini_libc
-# 使用 mini_libc_entry.S 作为用户程序的入口点
 add_executable(test_mini_libc_dynamic ${TEST_MINI_LIBC} src/mini_libc_entry.S)
 # 设置动态链接器路径，使用绝对路径
-set(DYNAMIC_LINKER_PATH "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/libdynamic_linker.so")
+get_filename_component(DYNAMIC_LINKER_PATH "${CMAKE_SOURCE_DIR}/../dynamic_linker/out/lib/libdynamic_linker.so" ABSOLUTE)
 set_target_properties(test_mini_libc_dynamic PROPERTIES
-    LINK_FLAGS "-nostdlib -Wl,--entry=_mini_libc_entry -Wl,-rpath,${CMAKE_RUNTIME_OUTPUT_DIRECTORY} -Wl,--dynamic-linker,${DYNAMIC_LINKER_PATH}")
+    LINK_FLAGS "-Wl,-rpath,${CMAKE_RUNTIME_OUTPUT_DIRECTORY} -Wl,--dynamic-linker,${DYNAMIC_LINKER_PATH}")
 target_link_libraries(test_mini_libc_dynamic mini_libc_shared)
 
-# 添加自定义命令，复制动态库到可执行文件目录，确保动态库可以被找到
-add_custom_command(TARGET test_mini_libc_dynamic POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy
-    ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libmini_libc.so
-    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/libmini_libc.so
-    COMMAND ${CMAKE_COMMAND} -E copy
-    ${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/libdynamic_linker.so
-    ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/libdynamic_linker.so)
+# 添加PIE版本的动态链接测试程序
+# PIE (Position Independent Executable) 支持地址空间布局随机化 (ASLR)
+add_executable(test_mini_libc_dynamic_PIE ${TEST_MINI_LIBC} src/mini_libc_entry.S)
+set_target_properties(test_mini_libc_dynamic_PIE PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+    COMPILE_FLAGS "-fPIE"
+    LINK_FLAGS "-pie -Wl,-rpath,${CMAKE_RUNTIME_OUTPUT_DIRECTORY} -Wl,--dynamic-linker,${DYNAMIC_LINKER_PATH}")
+target_link_libraries(test_mini_libc_dynamic_PIE mini_libc_shared)
