@@ -62,7 +62,7 @@ int vsprintf(char *buf, const char *format, va_list args)
             
             case 'x':  // 十六进制整数
             {
-                unsigned int value = va_arg(args, unsigned int);
+                unsigned long value = va_arg(args, unsigned long);
                 int len = strlen(itoa(value, num_buf, 16, 0));
                 memcpy(str, num_buf, len);
                 str += len;
